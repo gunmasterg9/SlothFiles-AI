@@ -33,7 +33,9 @@ import {
   Copy,
   Search,
   FileSpreadsheet,
-  Download
+  Download,
+  Send,
+  Wrench
 } from 'lucide-react';
 import {
   fetchHealth,
@@ -63,6 +65,11 @@ import {
   fetchShipmentAudits,
   fetchShipmentAudit,
   exportAuditReport,
+  fetchCopilotTools,
+  createCopilotSession,
+  fetchCopilotSessions,
+  fetchCopilotMessages,
+  sendCopilotPrompt,
   type HealthResponse,
   type ReadinessResponse,
   type SystemSettings,
@@ -73,7 +80,10 @@ import {
   type FolderWatch,
   type TaskRecord,
   type InboxItem,
-  type ShipmentAudit
+  type ShipmentAudit,
+  type CopilotTool,
+  type CopilotSession,
+  type CopilotMessage
 } from './services/api';
 
 type Tab =
@@ -135,6 +145,14 @@ export default function App() {
   const [auditTitleInput, setAuditTitleInput] = useState<string>('');
   const [isAuditing, setIsAuditing] = useState<boolean>(false);
   const [reportModalContent, setReportModalContent] = useState<string | null>(null);
+
+  // Copilot states
+  const [copilotSessions, setCopilotSessions] = useState<CopilotSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
+  const [copilotPrompt, setCopilotPrompt] = useState<string>('');
+  const [isCopilotLoading, setIsCopilotLoading] = useState<boolean>(false);
+  const [copilotTools, setCopilotTools] = useState<CopilotTool[]>([]);
 
   const loadData = async () => {
     try {
@@ -276,6 +294,104 @@ export default function App() {
     setCopiedDraft(true);
     setTimeout(() => setCopiedDraft(false), 2000);
   };
+
+  const loadCopilotData = async (preferredSessionId?: string) => {
+    try {
+      const [sessions, tools] = await Promise.all([
+        fetchCopilotSessions().catch(() => []),
+        fetchCopilotTools().catch(() => [])
+      ]);
+      setCopilotSessions(sessions);
+      setCopilotTools(tools);
+
+      let targetSessionId = preferredSessionId || activeSessionId;
+      if (!targetSessionId && sessions.length > 0) {
+        targetSessionId = sessions[0].id;
+      }
+      if (targetSessionId) {
+        setActiveSessionId(targetSessionId);
+        const msgs = await fetchCopilotMessages(targetSessionId).catch(() => []);
+        setCopilotMessages(msgs);
+      }
+    } catch (err: any) {
+      console.error('Failed to load copilot data:', err);
+    }
+  };
+
+  const handleCreateSession = async () => {
+    try {
+      const title = `Chat ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      const sess = await createCopilotSession(title);
+      setCopilotSessions((prev) => [sess, ...prev]);
+      setActiveSessionId(sess.id);
+      setCopilotMessages([]);
+      setActionNotice(`Created new Copilot session '${sess.title}'.`);
+    } catch (err: any) {
+      setActionNotice(`Failed to create chat session: ${err.message}`);
+    }
+  };
+
+  const handleSelectSession = async (sessId: string) => {
+    setActiveSessionId(sessId);
+    try {
+      const msgs = await fetchCopilotMessages(sessId);
+      setCopilotMessages(msgs);
+    } catch (err: any) {
+      setActionNotice(`Failed to load messages: ${err.message}`);
+    }
+  };
+
+  const handleSendPrompt = async (promptToSend?: string) => {
+    const text = (promptToSend || copilotPrompt).trim();
+    if (!text || isCopilotLoading) return;
+
+    let targetSessionId = activeSessionId;
+    if (!targetSessionId) {
+      try {
+        const sess = await createCopilotSession('General Assistant');
+        targetSessionId = sess.id;
+        setCopilotSessions((prev) => [sess, ...prev]);
+        setActiveSessionId(sess.id);
+      } catch (err: any) {
+        setActionNotice(`Failed to create session: ${err.message}`);
+        return;
+      }
+    }
+
+    setCopilotPrompt('');
+    setIsCopilotLoading(true);
+    const tempUserMsg: CopilotMessage = {
+      id: `temp-${Date.now()}`,
+      session_id: targetSessionId,
+      role: 'user',
+      content: text,
+      created_at: new Date().toISOString()
+    };
+    setCopilotMessages((prev) => [...prev, tempUserMsg]);
+
+    try {
+      const res = await sendCopilotPrompt(targetSessionId, text);
+      setCopilotMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempUserMsg.id),
+        res.user_message,
+        res.assistant_message
+      ]);
+      if (res.assistant_message.tool_calls?.some((t) => t.name === 'propose_file_organization')) {
+        setActionNotice('New file organization plan proposed and placed in Approvals queue.');
+        await loadData();
+      }
+    } catch (err: any) {
+      setActionNotice(`Copilot prompt error: ${err.message}`);
+    } finally {
+      setIsCopilotLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'copilot') {
+      loadCopilotData();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     loadData();
@@ -1671,6 +1787,290 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === 'copilot' && (
+            <div className="max-w-6xl mx-auto space-y-4 h-[calc(100vh-140px)] flex flex-col">
+              {/* Header / Status Banner */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-400">
+                    <Bot className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      Local AI Copilot & Restricted Tools
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-purple-500/20 text-purple-300 border border-purple-500/30 uppercase font-semibold">
+                        Offline-First
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Query system status, explain discrepancy findings, and propose actions through sandboxed tool schemas.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono">
+                    <Cpu className="w-3.5 h-3.5 text-purple-400" />
+                    <span className="text-slate-400">Model:</span>
+                    <span className="text-white font-semibold">{systemSettings?.ollama_selected_model || 'None'}</span>
+                    <span className={`w-2 h-2 rounded-full ${isOllamaConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                  </div>
+                  <button
+                    onClick={handleCreateSession}
+                    className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs flex items-center gap-1.5 transition"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    <span>New Chat</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Chat & Tools Container */}
+              <div className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-4 min-h-0">
+                {/* Left Panel: Sessions & Tool Registry */}
+                <div className="lg:col-span-1 rounded-xl border border-slate-800 bg-[#111726]/60 p-4 flex flex-col space-y-4 overflow-hidden">
+                  {/* Sessions */}
+                  <div className="flex-1 flex flex-col min-h-0">
+                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
+                      <span className="text-xs font-bold text-white uppercase tracking-wider font-mono">Chat Sessions</span>
+                      <span className="text-[11px] text-slate-500">{copilotSessions.length}</span>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
+                      {copilotSessions.length === 0 ? (
+                        <div className="p-3 text-center text-xs text-slate-500">
+                          No sessions yet. Send a prompt to start one.
+                        </div>
+                      ) : (
+                        copilotSessions.map((s) => (
+                          <button
+                            key={s.id}
+                            onClick={() => handleSelectSession(s.id)}
+                            className={`w-full text-left p-2.5 rounded-lg text-xs transition border flex items-center justify-between ${
+                              s.id === activeSessionId
+                                ? 'bg-purple-950/40 border-purple-500/40 text-purple-200'
+                                : 'bg-slate-900/40 border-slate-800/80 text-slate-300 hover:bg-slate-800/40'
+                            }`}
+                          >
+                            <span className="truncate max-w-[150px] font-medium" title={s.title}>
+                              {s.title}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              {s.message_count ?? 0} msgs
+                            </span>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Registered Tools Card */}
+                  <div className="border-t border-slate-800 pt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider font-mono flex items-center gap-1.5">
+                        <Wrench className="w-3.5 h-3.5 text-purple-400" />
+                        Tool Registry ({copilotTools.length})
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {copilotTools.map((t) => (
+                        <div key={t.name} className="p-2 rounded bg-slate-950/60 border border-slate-800 text-[11px]">
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono text-purple-300 font-semibold truncate max-w-[120px]" title={t.name}>
+                              {t.name}
+                            </span>
+                            <span className={`px-1.5 py-0.2 rounded text-[9px] font-mono ${
+                              t.permission === 'PROPOSE_PLAN'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                            }`}>
+                              {t.permission}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-500 mt-0.5 line-clamp-1" title={t.description}>
+                            {t.description}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Panel: Messages & Input */}
+                <div className="lg:col-span-3 rounded-xl border border-slate-800 bg-[#111726]/60 flex flex-col overflow-hidden">
+                  {/* Messages Scroll Area */}
+                  <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {copilotMessages.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-400 space-y-4">
+                        <div className="w-12 h-12 rounded-2xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                          <Bot className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <h4 className="text-base font-bold text-white">How can SlothPilot help you today?</h4>
+                          <p className="text-xs text-slate-400 max-w-md mt-1">
+                            Ask questions, inspect discrepancy findings, or propose organizer actions. Direct filesystem mutations are strictly guarded behind approvals.
+                          </p>
+                        </div>
+
+                        {/* Suggested Prompts */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-xl w-full pt-2">
+                          <button
+                            onClick={() => handleSendPrompt('What is the current system status and connected model?')}
+                            className="p-3 text-left rounded-xl bg-slate-900/80 border border-slate-800 hover:border-purple-500/50 hover:bg-slate-900 text-xs text-slate-300 transition group"
+                          >
+                            <div className="font-semibold text-white group-hover:text-purple-300">System Status</div>
+                            <div className="text-[11px] text-slate-500 mt-0.5">Check health and model connectivity</div>
+                          </button>
+                          <button
+                            onClick={() => handleSendPrompt('List all approved filesystem roots.')}
+                            className="p-3 text-left rounded-xl bg-slate-900/80 border border-slate-800 hover:border-purple-500/50 hover:bg-slate-900 text-xs text-slate-300 transition group"
+                          >
+                            <div className="font-semibold text-white group-hover:text-purple-300">Approved Roots</div>
+                            <div className="text-[11px] text-slate-500 mt-0.5">Inspect directories allowed for file ops</div>
+                          </button>
+                          <button
+                            onClick={() => handleSendPrompt('Summarize any discrepancies in TradeSloth audits.')}
+                            className="p-3 text-left rounded-xl bg-slate-900/80 border border-slate-800 hover:border-purple-500/50 hover:bg-slate-900 text-xs text-slate-300 transition group"
+                          >
+                            <div className="font-semibold text-white group-hover:text-purple-300">Shipment Audits</div>
+                            <div className="text-[11px] text-slate-500 mt-0.5">Cross-document discrepancy overview</div>
+                          </button>
+                          <button
+                            onClick={() => handleSendPrompt('What is the status of running tasks in the background?')}
+                            className="p-3 text-left rounded-xl bg-slate-900/80 border border-slate-800 hover:border-purple-500/50 hover:bg-slate-900 text-xs text-slate-300 transition group"
+                          >
+                            <div className="font-semibold text-white group-hover:text-purple-300">Task Queue</div>
+                            <div className="text-[11px] text-slate-500 mt-0.5">Inspect queued and completed tasks</div>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      copilotMessages.map((m) => {
+                        const isUser = m.role === 'user';
+                        return (
+                          <div
+                            key={m.id}
+                            className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}
+                          >
+                            {!isUser && (
+                              <div className="w-8 h-8 rounded-lg bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-400 shrink-0 mt-0.5">
+                                <Bot className="w-4 h-4" />
+                              </div>
+                            )}
+
+                            <div
+                              className={`max-w-2xl rounded-2xl p-4 text-xs space-y-2.5 leading-relaxed ${
+                                isUser
+                                  ? 'bg-purple-600 text-white rounded-br-none shadow-lg shadow-purple-600/10'
+                                  : 'bg-slate-900/90 border border-slate-800 text-slate-200 rounded-bl-none'
+                              }`}
+                            >
+                              <div className="whitespace-pre-wrap">{m.content}</div>
+
+                              {/* Tool calls card */}
+                              {m.tool_calls && m.tool_calls.length > 0 && (
+                                <div className="space-y-2 pt-1 border-t border-slate-800/80">
+                                  {m.tool_calls.map((tc, idx) => (
+                                    <div
+                                      key={idx}
+                                      className="p-2.5 rounded-lg bg-slate-950/80 border border-purple-500/30 text-[11px] space-y-1.5"
+                                    >
+                                      <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-1.5 font-mono text-purple-300 font-bold">
+                                          <Wrench className="w-3.5 h-3.5" />
+                                          <span>Executed Tool: {tc.name}</span>
+                                        </div>
+                                        <span className="px-1.5 py-0.2 rounded text-[9px] font-mono bg-purple-500/20 text-purple-300">
+                                          Sandboxed
+                                        </span>
+                                      </div>
+
+                                      {/* Arguments */}
+                                      {Object.keys(tc.arguments || {}).length > 0 && (
+                                        <div className="text-slate-400 font-mono text-[10px] bg-slate-900/60 p-1.5 rounded">
+                                          Args: {JSON.stringify(tc.arguments)}
+                                        </div>
+                                      )}
+
+                                      {/* If propose_file_organization was executed */}
+                                      {tc.name === 'propose_file_organization' && (
+                                        <div className="flex items-center justify-between pt-1">
+                                          <span className="text-emerald-400 text-[10px] font-medium">
+                                            ✓ Action plan prepared and sent to Approvals
+                                          </span>
+                                          <button
+                                            onClick={() => setActiveTab('approvals')}
+                                            className="px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold text-[10px] flex items-center gap-1 transition"
+                                          >
+                                            <CheckCircle2 className="w-3 h-3" />
+                                            <span>Review in Approvals</span>
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            {isUser && (
+                              <div className="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 shrink-0 mt-0.5">
+                                <span className="text-xs font-bold font-mono">U</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                    {isCopilotLoading && (
+                      <div className="flex gap-3 justify-start items-center text-xs text-slate-400">
+                        <div className="w-8 h-8 rounded-lg bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-400 shrink-0">
+                          <Bot className="w-4 h-4 animate-spin" />
+                        </div>
+                        <div className="p-3 rounded-2xl bg-slate-900 border border-slate-800 flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                          <span>Copilot reasoning & validating tool constraints...</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Input Form */}
+                  <div className="p-3 border-t border-slate-800 bg-slate-900/40">
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleSendPrompt();
+                      }}
+                      className="flex gap-2"
+                    >
+                      <input
+                        type="text"
+                        placeholder="Ask about shipment audits, request system status, or ask to organize a folder..."
+                        value={copilotPrompt}
+                        onChange={(e) => setCopilotPrompt(e.target.value)}
+                        disabled={isCopilotLoading}
+                        className="flex-1 px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isCopilotLoading || !copilotPrompt.trim()}
+                        className="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-medium text-xs flex items-center gap-2 transition shadow-lg shadow-purple-600/20"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Send</span>
+                      </button>
+                    </form>
+                    <div className="flex items-center justify-between mt-2 px-1 text-[10px] text-slate-500">
+                      <span>Restricted tools obey approval workflows. Zero direct shell or command execution.</span>
+                      <span className="font-mono">Local Loopback (127.0.0.1)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {activeTab === 'approvals' && (
             <div className="space-y-6 max-w-5xl mx-auto">
               <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
@@ -2024,7 +2424,7 @@ export default function App() {
             </div>
           )}
 
-          {activeTab !== 'overview' && activeTab !== 'settings' && activeTab !== 'organizer' && activeTab !== 'approvals' && activeTab !== 'lazydesk' && activeTab !== 'tasks' && (
+          {activeTab !== 'overview' && activeTab !== 'settings' && activeTab !== 'organizer' && activeTab !== 'approvals' && activeTab !== 'lazydesk' && activeTab !== 'tasks' && activeTab !== 'inbox' && activeTab !== 'tradesloth' && activeTab !== 'copilot' && (
             <div className="max-w-6xl mx-auto rounded-xl border border-slate-800 bg-[#111726]/40 p-8 text-center text-slate-400">
               <div className="w-12 h-12 mx-auto rounded-xl bg-slate-800 flex items-center justify-center text-slate-300 mb-3">
                 <Sparkles className="w-6 h-6 text-emerald-400" />

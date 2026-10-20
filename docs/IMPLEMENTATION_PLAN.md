@@ -169,7 +169,15 @@ slothpilot-ai/
 
 ### Milestone M7: Local AI Copilot & Restricted Tools
 - **Goal:** Conversational copilot with streaming/structured response, tool registry with strict Pydantic schemas, explicit per-tool permissions (read-only query tools vs. plan-proposing tools), model offline detection and deterministic fallback.
-- **Verification:** Test tool dispatcher rejects arbitrary command execution, tests tool permission checking, tests copilot tool proposals route through approval queue.
+- **Verification:**
+  - Pytest suite: 45 tests passing (`test_copilot.py` with 5 focused tests, and zero regressions across M1-M6).
+  - Tool registry schemas and permissions verified: strict Pydantic validation on tool arguments, strict segregation between `READ_ONLY` and `PROPOSE_PLAN` permissions, reject arbitrary shell/filesystem execution.
+  - Conversational session lifecycle verified: sessions and messages persisted in SQLite with bounded context window.
+  - Deterministic fallback verified: when Ollama local model is offline or unconfigured, copilot seamlessly falls back to deterministic handlers for system status, approved roots, audits, and tasks without errors.
+  - Sandboxed action execution verified: copilot tool `propose_file_organization` strictly routes to `approval_service`, creating a pending plan with SHA-256 integrity hashes in the shared approval queue without making direct filesystem changes.
+  - API routes verified: `/api/copilot/tools`, `/api/copilot/sessions`, `/api/copilot/sessions/{id}/messages`, and `/api/copilot/sessions/{id}/chat`.
+  - Frontend production build: compiled in 4.13s with chat sessions manager, tool registry capabilities viewer, message feed with interactive sandboxed tool call badges, direct link to Approvals queue, and quick-prompt chips.
+- **Status:** Completed.
 
 ### Milestone M8: Security Hardening, Integration Tests & Offline Verification
 - **Goal:** Comprehensive security test suite (path traversal `..`, UNC/drive hopping, symlink escape, stale approvals, source file modification race conditions), complete offline verification test with internet disabled.

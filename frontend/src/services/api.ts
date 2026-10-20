@@ -446,3 +446,86 @@ export async function exportAuditReport(auditId: string): Promise<string> {
   if (!res.ok) throw new Error(`Export report failed: HTTP ${res.status}`);
   return res.text();
 }
+
+export interface CopilotToolParam {
+  name: string;
+  type: string;
+  description: string;
+  required: boolean;
+}
+
+export interface CopilotTool {
+  name: string;
+  description: string;
+  permission: 'READ_ONLY' | 'PROPOSE_PLAN';
+  parameters: CopilotToolParam[];
+}
+
+export interface CopilotMessage {
+  id: string;
+  session_id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  tool_calls?: Array<{
+    name: string;
+    arguments: Record<string, any>;
+    permission?: string;
+  }> | null;
+  tool_results?: Array<{
+    name: string;
+    result: any;
+  }> | null;
+  created_at: string;
+}
+
+export interface CopilotSession {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count?: number;
+}
+
+export async function fetchCopilotTools(): Promise<CopilotTool[]> {
+  const res = await fetch(`${API_BASE}/copilot/tools`);
+  if (!res.ok) throw new Error(`Fetch copilot tools failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function createCopilotSession(title?: string): Promise<CopilotSession> {
+  const res = await fetch(`${API_BASE}/copilot/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Failed to create session.');
+  }
+  return res.json();
+}
+
+export async function fetchCopilotSessions(): Promise<CopilotSession[]> {
+  const res = await fetch(`${API_BASE}/copilot/sessions`);
+  if (!res.ok) throw new Error(`Fetch copilot sessions failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCopilotMessages(sessionId: string): Promise<CopilotMessage[]> {
+  const res = await fetch(`${API_BASE}/copilot/sessions/${sessionId}/messages`);
+  if (!res.ok) throw new Error(`Fetch copilot messages failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function sendCopilotPrompt(sessionId: string, prompt: string): Promise<{ user_message: CopilotMessage; assistant_message: CopilotMessage }> {
+  const res = await fetch(`${API_BASE}/copilot/sessions/${sessionId}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Chat prompt failed.');
+  }
+  return res.json();
+}
