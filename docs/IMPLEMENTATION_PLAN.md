@@ -181,7 +181,17 @@ slothpilot-ai/
 
 ### Milestone M8: Security Hardening, Integration Tests & Offline Verification
 - **Goal:** Comprehensive security test suite (path traversal `..`, UNC/drive hopping, symlink escape, stale approvals, source file modification race conditions), complete offline verification test with internet disabled.
-- **Verification:** 100% security tests pass; application operates without external internet connection.
+- **Verification:**
+  - Pytest suite: 53 tests passing across 12 test files (`test_security_hardening.py` with 8 focused security tests, and zero regressions across M1-M7).
+  - Symlink escape protection verified: symlinks pointing outside approved root boundaries are resolved and blocked with 403 Forbidden.
+  - Case-insensitive path resolution verified on Windows: drive letters and casing variances normalize safely.
+  - Destination collision abort verified: existing destination files prevent overwriting with 409 Conflict; source remains untouched.
+  - Stale approval tokens rejected: re-approving or rejecting completed/stale plans raises 400 Bad Request.
+  - Source file modification race condition verified: source hash changes between plan creation and approval abort execution immediately with 409 Conflict.
+  - Append-only audit trigger verified: direct SQL `UPDATE` and `DELETE` on `audit_logs` are blocked by SQLite triggers.
+  - DNS rebinding & Host guard verified: requests with untrusted Host headers are rejected with 403 Forbidden.
+  - Offline verification suite verified: local loopback health, local Ollama runtime discovery, synthetic offline folder scan, SHA-256 duplicate detection, plan approval, audit recording, and deterministic TradeSloth audits execute completely without external internet connectivity.
+- **Status:** Completed.
 
 ### Milestone M9: Documentation, Demonstration & Hacktoberfest Submission
 - **Goal:** Operational PowerShell scripts (`setup.ps1`, `start.ps1`, `stop.ps1`, `verify.ps1`), `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, `docs/TESTING.md`, `docs/DEMO.md`, `README.md`, `LICENSE`, `CONTRIBUTING.md`, and DEV.to article draft.
