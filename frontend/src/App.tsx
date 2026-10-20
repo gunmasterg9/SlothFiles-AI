@@ -14,13 +14,26 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
-  ArrowRight
+  ArrowRight,
+  FolderPlus,
+  Trash2,
+  Check,
+  FileCheck
 } from 'lucide-react';
 import {
   fetchHealth,
   fetchReadiness,
+  fetchSettings,
+  fetchModels,
+  selectModel,
+  addApprovedRoot,
+  removeApprovedRoot,
+  fetchAuditLogs,
   type HealthResponse,
-  type ReadinessResponse
+  type ReadinessResponse,
+  type SystemSettings,
+  type ModelsResponse,
+  type AuditLogEntry
 } from './services/api';
 
 type Tab =
@@ -38,28 +51,87 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [modelsData, setModelsData] = useState<ModelsResponse | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [totalAuditLogs, setTotalAuditLogs] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  const checkStatus = async () => {
+  // Settings form states
+  const [newRootPath, setNewRootPath] = useState<string>('');
+  const [newRootLabel, setNewRootLabel] = useState<string>('');
+  const [settingActionMsg, setSettingActionMsg] = useState<string | null>(null);
+
+  const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
-      const [h, r] = await Promise.all([fetchHealth(), fetchReadiness()]);
-      setHealth(h);
-      setReadiness(r);
+      const [h, r, s, m, a] = await Promise.all([
+        fetchHealth().catch(() => null),
+        fetchReadiness().catch(() => null),
+        fetchSettings().catch(() => null),
+        fetchModels().catch(() => null),
+        fetchAuditLogs(undefined, 10, 0).catch(() => ({ total: 0, items: [] }))
+      ]);
+
+      if (h) setHealth(h);
+      if (r) setReadiness(r);
+      if (s) setSystemSettings(s);
+      if (m) setModelsData(m);
+      if (a) {
+        setAuditLogs(a.items);
+        setTotalAuditLogs(a.total);
+      }
     } catch (err: any) {
-      setError(err.message || 'Failed to connect to backend service.');
+      setError(err.message || 'Error communicating with backend service.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    checkStatus();
-    const interval = setInterval(checkStatus, 15000);
+    loadData();
+    const interval = setInterval(loadData, 15000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleModelChange = async (newModel: string) => {
+    try {
+      setSettingActionMsg('Updating model...');
+      await selectModel(newModel);
+      setSettingActionMsg(`Active model switched to ${newModel}`);
+      await loadData();
+    } catch (err: any) {
+      setSettingActionMsg(`Error: ${err.message}`);
+    }
+  };
+
+  const handleAddRoot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRootPath.trim()) return;
+    try {
+      setSettingActionMsg('Adding approved root...');
+      await addApprovedRoot(newRootPath.trim(), newRootLabel.trim());
+      setNewRootPath('');
+      setNewRootLabel('');
+      setSettingActionMsg('Folder root approved successfully.');
+      await loadData();
+    } catch (err: any) {
+      setSettingActionMsg(`Error: ${err.message}`);
+    }
+  };
+
+  const handleRemoveRoot = async (rootId: string) => {
+    try {
+      setSettingActionMsg('Deactivating root...');
+      await removeApprovedRoot(rootId);
+      setSettingActionMsg('Folder root deactivated.');
+      await loadData();
+    } catch (err: any) {
+      setSettingActionMsg(`Error: ${err.message}`);
+    }
+  };
 
   const ollamaComponent = readiness?.components.find((c) => c.name === 'ollama');
   const isOllamaConnected = ollamaComponent?.status === 'connected';
@@ -73,7 +145,7 @@ export default function App() {
     { id: 'copilot', label: 'Local Copilot', icon: Bot },
     { id: 'approvals', label: 'Approvals', icon: CheckCircle2, badge: 0 },
     { id: 'tasks', label: 'Task History', icon: ListTodo },
-    { id: 'settings', label: 'Settings', icon: SettingsIcon },
+    { id: 'settings', label: 'Settings & Audit', icon: SettingsIcon },
   ];
 
   return (
@@ -124,7 +196,7 @@ export default function App() {
           </nav>
         </div>
 
-        {/* Runtime Diagnostics Footer */}
+        {/* Diagnostics Footer */}
         <div className="p-3 border-t border-slate-800 text-[11px] text-slate-400 space-y-2">
           <div className="flex items-center justify-between px-2 py-1.5 rounded bg-slate-900/60 border border-slate-800">
             <span className="flex items-center gap-1.5">
@@ -139,10 +211,10 @@ export default function App() {
           <div className="flex items-center justify-between px-2 py-1.5 rounded bg-slate-900/60 border border-slate-800">
             <span className="flex items-center gap-1.5">
               <span className={`w-2 h-2 rounded-full ${isOllamaConnected ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-amber-400'}`} />
-              Ollama Engine
+              Ollama
             </span>
-            <span className="font-mono text-[10px] text-slate-300">
-              {isOllamaConnected ? 'Active' : 'Offline / Waiting'}
+            <span className="font-mono text-[10px] text-slate-300 truncate max-w-[90px]" title={systemSettings?.ollama_selected_model}>
+              {systemSettings?.ollama_selected_model || (isOllamaConnected ? 'Active' : 'Offline')}
             </span>
           </div>
         </div>
@@ -169,9 +241,9 @@ export default function App() {
             )}
 
             <button
-              onClick={checkStatus}
+              onClick={loadData}
               disabled={loading}
-              title="Refresh health checks"
+              title="Refresh health checks and data"
               className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700 transition"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -188,7 +260,7 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2 mb-1">
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 uppercase">
-                      Local AI Ready
+                      Local AI Active
                     </span>
                     <span className="text-xs text-slate-400">v{health?.version || '0.1.0'}</span>
                   </div>
@@ -225,11 +297,11 @@ export default function App() {
                     <span>Ollama Status</span>
                     <Cpu className="w-4 h-4 text-emerald-400" />
                   </div>
-                  <div className="text-base font-bold text-white">
-                    {isOllamaConnected ? 'Active on 11434' : 'Offline / Standby'}
+                  <div className="text-base font-bold text-white truncate" title={systemSettings?.ollama_selected_model}>
+                    {systemSettings?.ollama_selected_model || (isOllamaConnected ? 'Active' : 'Offline')}
                   </div>
                   <p className="text-[11px] text-slate-500 mt-1">
-                    {ollamaComponent?.details || 'Local models available'}
+                    {modelsData?.count ? `${modelsData.count} models detected locally` : 'Ollama local inference'}
                   </p>
                 </div>
 
@@ -246,12 +318,14 @@ export default function App() {
 
                 <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
                   <div className="flex items-center justify-between text-slate-400 text-xs mb-2">
-                    <span>Active Folder Watches</span>
-                    <Clock className="w-4 h-4 text-blue-400" />
+                    <span>Approved Roots</span>
+                    <FolderTree className="w-4 h-4 text-blue-400" />
                   </div>
-                  <div className="text-base font-bold text-white">0 Folders</div>
+                  <div className="text-base font-bold text-white">
+                    {systemSettings?.approved_roots.length || 0} Folders
+                  </div>
                   <p className="text-[11px] text-slate-500 mt-1">
-                    LazyDesk watch queue standby
+                    Restricted filesystem boundaries
                   </p>
                 </div>
 
@@ -260,9 +334,11 @@ export default function App() {
                     <span>Audit Logs</span>
                     <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   </div>
-                  <div className="text-base font-bold text-white">Append-Only</div>
+                  <div className="text-base font-bold text-white">
+                    {totalAuditLogs} Records
+                  </div>
                   <p className="text-[11px] text-slate-500 mt-1">
-                    Immutable SQLite audit record
+                    Immutable append-only trail
                   </p>
                 </div>
               </div>
@@ -281,7 +357,7 @@ export default function App() {
                     <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-emerald-400 transition" />
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Scan folders, compute SHA-256 duplicate hashes, extract text from PDFs and Office docs, and review deterministic move plans.
+                    Scan approved folders, detect SHA-256 duplicate files, extract document text, and prepare safe approval-gated move plans.
                   </p>
                 </div>
 
@@ -297,7 +373,7 @@ export default function App() {
                     <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-blue-400 transition" />
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Watch folders continuously for downloads or invoice drops. Features event loop prevention and auto-summaries.
+                    Monitor approved folders for new downloads or dropped documents. Loop-proof queueing with cooperative pause and resume.
                   </p>
                 </div>
 
@@ -313,7 +389,7 @@ export default function App() {
                     <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-purple-400 transition" />
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Import notes and EML email files offline. Extract action items, date obligations with source quotes, and draft local replies.
+                    Import notes and EML files locally. Extract action items, date commitments with source quotes, and draft local replies.
                   </p>
                 </div>
 
@@ -329,7 +405,7 @@ export default function App() {
                     <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-amber-400 transition" />
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Audit multi-document shipments (Bill of Lading, Commercial Invoice, Packing List). High-precision decimal arithmetic.
+                    Cross-audit trade and shipping documents. Extract quantities, weights, and currency totals with high-precision decimal comparison.
                   </p>
                 </div>
 
@@ -345,30 +421,224 @@ export default function App() {
                     <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-teal-400 transition" />
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Chat with your offline models. Registered tools with strict Pydantic schemas, permission boundaries, and offline fallbacks.
+                    Conversational assistant with tool execution sandboxed by strict Pydantic schemas and approval gates.
                   </p>
                 </div>
 
                 <div
-                  onClick={() => setActiveTab('approvals')}
+                  onClick={() => setActiveTab('settings')}
                   className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 hover:border-emerald-500/40 cursor-pointer transition group"
                 >
                   <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center mb-3 group-hover:scale-105 transition">
-                    <CheckCircle2 className="w-4 h-4" />
+                    <SettingsIcon className="w-4 h-4" />
                   </div>
                   <h4 className="text-sm font-semibold text-white mb-1 flex items-center justify-between">
-                    Action Approvals
+                    Settings & Security
                     <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-emerald-400 transition" />
                   </h4>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Inspect pending file moves, renames, and batch reorganizations. Check preconditions, risk levels, and safe rollback history.
+                    Manage approved folder roots, switch local Ollama models, and inspect the tamper-evident audit log.
                   </p>
                 </div>
               </div>
             </div>
           )}
 
-          {activeTab !== 'overview' && (
+          {activeTab === 'settings' && (
+            <div className="space-y-6 max-w-5xl mx-auto">
+              {settingActionMsg && (
+                <div className="p-3 rounded-lg bg-slate-800 border border-slate-700 text-xs text-emerald-400 flex items-center justify-between">
+                  <span>{settingActionMsg}</span>
+                  <button onClick={() => setSettingActionMsg(null)} className="text-slate-400 hover:text-white">
+                    <Check className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Local Ollama Model Configuration */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Cpu className="w-4 h-4 text-emerald-400" />
+                      Local Ollama AI Inference
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Open-weight models detected directly from your local Ollama runtime on loopback.
+                    </p>
+                  </div>
+                  <span className={`px-2.5 py-1 rounded text-xs font-mono font-medium ${isOllamaConnected ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'}`}>
+                    {isOllamaConnected ? 'Ollama Online' : 'Ollama Offline'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Endpoint URL (Loopback Only)
+                    </label>
+                    <input
+                      type="text"
+                      disabled
+                      value={systemSettings?.ollama_base_url || 'http://127.0.0.1:11434'}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono text-slate-400 cursor-not-allowed"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      Active Model
+                    </label>
+                    <select
+                      value={systemSettings?.ollama_selected_model || ''}
+                      onChange={(e) => handleModelChange(e.target.value)}
+                      disabled={!modelsData?.models.length}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
+                    >
+                      {modelsData?.models.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                      {!modelsData?.models.length && (
+                        <option value="">No local models detected</option>
+                      )}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Approved Directory Roots */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-blue-400" />
+                      Approved Directory Roots
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Filesystem operations are strictly confined to these user-approved directories. All path traversal is blocked.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Add Root Form */}
+                <form onSubmit={handleAddRoot} className="flex gap-2 pt-2">
+                  <input
+                    type="text"
+                    placeholder="e.g. C:\Users\RAHUL\Documents\Organize"
+                    value={newRootPath}
+                    onChange={(e) => setNewRootPath(e.target.value)}
+                    className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Label (optional)"
+                    value={newRootLabel}
+                    onChange={(e) => setNewRootLabel(e.target.value)}
+                    className="w-44 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1.5 transition"
+                  >
+                    <FolderPlus className="w-3.5 h-3.5" />
+                    <span>Approve Root</span>
+                  </button>
+                </form>
+
+                {/* Roots List */}
+                <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden bg-slate-900/40">
+                  {systemSettings?.approved_roots.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-slate-500">
+                      No approved roots registered yet. Add a directory above to allow file scanning.
+                    </div>
+                  ) : (
+                    systemSettings?.approved_roots.map((root) => (
+                      <div key={root.id} className="p-3 flex items-center justify-between text-xs">
+                        <div>
+                          <div className="font-semibold text-white">{root.label}</div>
+                          <div className="font-mono text-[11px] text-slate-400">{root.path}</div>
+                        </div>
+                        <button
+                          onClick={() => handleRemoveRoot(root.id)}
+                          className="p-1.5 rounded text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition"
+                          title="Deactivate root"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Append-Only Audit Trail */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <FileCheck className="w-4 h-4 text-emerald-400" />
+                      Append-Only Audit Log
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Immutable record of all consequential operations, path validations, and approvals.
+                    </p>
+                  </div>
+                  <span className="text-xs text-slate-400 font-mono">
+                    {totalAuditLogs} Total Entries
+                  </span>
+                </div>
+
+                <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900/40">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-900 text-slate-400 border-b border-slate-800 font-mono text-[11px]">
+                      <tr>
+                        <th className="p-2.5">Time (UTC)</th>
+                        <th className="p-2.5">Module</th>
+                        <th className="p-2.5">Action</th>
+                        <th className="p-2.5">Details</th>
+                        <th className="p-2.5">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800 text-slate-300">
+                      {auditLogs.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="p-4 text-center text-slate-500">
+                            No audit log events recorded yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        auditLogs.map((log) => (
+                          <tr key={log.id} className="hover:bg-slate-800/30 transition">
+                            <td className="p-2.5 font-mono text-[11px] text-slate-400">
+                              {log.timestamp.slice(11, 19)}
+                            </td>
+                            <td className="p-2.5 uppercase font-mono text-[10px] text-slate-400">
+                              {log.module}
+                            </td>
+                            <td className="p-2.5 font-medium text-white">
+                              {log.action}
+                            </td>
+                            <td className="p-2.5 text-slate-400 truncate max-w-xs" title={log.details}>
+                              {log.details}
+                            </td>
+                            <td className="p-2.5">
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${log.success ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+                                {log.success ? 'SUCCESS' : 'BLOCKED'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab !== 'overview' && activeTab !== 'settings' && (
             <div className="max-w-6xl mx-auto rounded-xl border border-slate-800 bg-[#111726]/40 p-8 text-center text-slate-400">
               <div className="w-12 h-12 mx-auto rounded-xl bg-slate-800 flex items-center justify-center text-slate-300 mb-3">
                 <Sparkles className="w-6 h-6 text-emerald-400" />

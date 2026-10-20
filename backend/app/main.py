@@ -7,7 +7,8 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.config import settings
-from backend.app.routers import health
+from backend.app.db.migrations import run_migrations
+from backend.app.routers import health, settings as settings_router, audit
 
 # Setup logging
 logging.basicConfig(
@@ -19,9 +20,10 @@ logger = logging.getLogger("slothpilot")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan: run initialization checks on startup and cleanup on shutdown."""
+    """Application lifespan: run initialization checks and migrations on startup."""
     logger.info("Initializing SlothPilot AI backend on loopback interface %s:%s", settings.host, settings.port)
     settings.resolved_data_dir.mkdir(parents=True, exist_ok=True)
+    run_migrations()
     yield
     logger.info("Shutting down SlothPilot AI backend.")
 
@@ -114,3 +116,5 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 # Include Routers
 app.include_router(health.router)
+app.include_router(settings_router.router)
+app.include_router(audit.router)

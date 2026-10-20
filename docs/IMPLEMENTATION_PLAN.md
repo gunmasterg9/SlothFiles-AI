@@ -112,7 +112,13 @@ slothpilot-ai/
 
 ### Milestone M2: Ollama Integration, Settings, SQLite & Audit Infrastructure
 - **Goal:** Local Ollama API client (no cloud fallback, real model discovery, timeouts, structured errors), SQLite versioned migrations, approved roots manager, append-only audit log service.
-- **Verification:** Unit tests for model discovery (`qwen2.5:7b`, `llama3.2:latest`); test SQLite migration runner; test append-only audit log constraints.
+- **Verification:**
+  - Pytest suite: 18 tests passed across 5 test suites (`test_database_and_audit.py`, `test_health.py`, `test_ollama_service.py`, `test_path_security.py`, `test_settings_and_audit_api.py`).
+  - Append-only immutability verified: SQLite triggers block UPDATE and DELETE queries on `audit_logs`.
+  - Ollama runtime discovery tested: detects local models (`qwen2.5:7b`, `llama3.2:latest`, `smollm2:latest`) on loopback.
+  - Path traversal security verified: blocks `..`, outside paths, and UNC paths.
+  - Frontend production build: compiled in 3.60s with full Settings and Audit UI.
+- **Status:** Completed.
 
 ### Milestone M3: Smart File Organizer
 - **Goal:** Approved folder selection, file metadata indexing, SHA-256 duplicate detection, document text extraction (PDF, DOCX, XLSX, TXT), AI classification with deterministic category allowlist, action plan generation, conflict detection, approval workflow, safe file move/rename, undo support.
