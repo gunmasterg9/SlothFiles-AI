@@ -138,6 +138,44 @@ export interface InboxItem {
   metadata: Record<string, any>;
 }
 
+export interface TradeSlothFinding {
+  id?: string;
+  field_name: string;
+  status?: string;
+  source_documents: string[];
+  extracted_values: Record<string, string>;
+  normalized_value?: string | null;
+  difference?: string | null;
+  tolerance?: string | null;
+  severity: 'info' | 'low' | 'medium' | 'high';
+  confidence: number;
+  evidence_reference: string;
+  recommended_action: string;
+}
+
+export interface ShipmentAudit {
+  id: string;
+  title: string;
+  status: 'completed' | 'discrepancies_found' | 'clean';
+  created_at: string;
+  summary: {
+    total_documents: number;
+    documents: Array<{
+      filename: string;
+      path: string;
+      document_type: string;
+      extraction_status: string;
+    }>;
+    total_findings: number;
+    discrepancies: number;
+    verified: number;
+    unreadable: number;
+    missing: number;
+    legal_disclaimer: string;
+  };
+  findings?: TradeSlothFinding[];
+}
+
 export interface AuditLogEntry {
   id: number;
   timestamp: string;
@@ -376,4 +414,35 @@ export async function analyzeInboxItem(itemId: string, use_ai: boolean = true): 
     throw new Error(data?.error?.message || data?.detail || 'Failed to analyze inbox item.');
   }
   return res.json();
+}
+
+export async function runShipmentAudit(document_paths: string[], title?: string): Promise<ShipmentAudit> {
+  const res = await fetch(`${API_BASE}/tradesloth/audit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document_paths, title })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Shipment audit failed.');
+  }
+  return res.json();
+}
+
+export async function fetchShipmentAudits(): Promise<ShipmentAudit[]> {
+  const res = await fetch(`${API_BASE}/tradesloth/audits`);
+  if (!res.ok) throw new Error(`Fetch shipment audits failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchShipmentAudit(auditId: string): Promise<ShipmentAudit> {
+  const res = await fetch(`${API_BASE}/tradesloth/audits/${auditId}`);
+  if (!res.ok) throw new Error(`Fetch shipment audit failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function exportAuditReport(auditId: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/tradesloth/audits/${auditId}/report`);
+  if (!res.ok) throw new Error(`Export report failed: HTTP ${res.status}`);
+  return res.text();
 }

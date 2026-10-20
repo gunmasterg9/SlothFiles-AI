@@ -31,7 +31,9 @@ import {
   ListChecks,
   MessageSquare,
   Copy,
-  Search
+  Search,
+  FileSpreadsheet,
+  Download
 } from 'lucide-react';
 import {
   fetchHealth,
@@ -57,6 +59,10 @@ import {
   importInboxFile,
   fetchInboxItems,
   analyzeInboxItem,
+  runShipmentAudit,
+  fetchShipmentAudits,
+  fetchShipmentAudit,
+  exportAuditReport,
   type HealthResponse,
   type ReadinessResponse,
   type SystemSettings,
@@ -66,7 +72,8 @@ import {
   type ScanResult,
   type FolderWatch,
   type TaskRecord,
-  type InboxItem
+  type InboxItem,
+  type ShipmentAudit
 } from './services/api';
 
 type Tab =
@@ -121,11 +128,19 @@ export default function App() {
   const [isAnalyzingInbox, setIsAnalyzingInbox] = useState<boolean>(false);
   const [copiedDraft, setCopiedDraft] = useState<boolean>(false);
 
+  // TradeSloth states
+  const [shipmentAudits, setShipmentAudits] = useState<ShipmentAudit[]>([]);
+  const [selectedAudit, setSelectedAudit] = useState<ShipmentAudit | null>(null);
+  const [auditPathsInput, setAuditPathsInput] = useState<string>('');
+  const [auditTitleInput, setAuditTitleInput] = useState<string>('');
+  const [isAuditing, setIsAuditing] = useState<boolean>(false);
+  const [reportModalContent, setReportModalContent] = useState<string | null>(null);
+
   const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
-      const [h, r, s, m, a, p, w, t, inb] = await Promise.all([
+      const [h, r, s, m, a, p, w, t, inb, aud] = await Promise.all([
         fetchHealth().catch(() => null),
         fetchReadiness().catch(() => null),
         fetchSettings().catch(() => null),
@@ -134,7 +149,8 @@ export default function App() {
         fetchPendingApprovals().catch(() => []),
         fetchWatches().catch(() => []),
         fetchTasks(undefined, 20).catch(() => []),
-        fetchInboxItems(inboxSearchQuery || undefined).catch(() => [])
+        fetchInboxItems(inboxSearchQuery || undefined).catch(() => []),
+        fetchShipmentAudits().catch(() => [])
       ]);
 
       if (h) setHealth(h);
@@ -165,10 +181,59 @@ export default function App() {
           return null;
         });
       }
+      if (aud) {
+        setShipmentAudits(aud);
+        if (!selectedAudit && aud.length > 0) {
+          fetchShipmentAudit(aud[0].id).then((full) => setSelectedAudit(full)).catch(() => {});
+        }
+      }
     } catch (err: any) {
       setError(err.message || 'Error communicating with backend service.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRunAudit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const paths = auditPathsInput
+      .split('\n')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (paths.length === 0) return;
+    try {
+      setIsAuditing(true);
+      setActionNotice('Running TradeSloth cross-audit with exact decimal arithmetic...');
+      const res = await runShipmentAudit(paths, auditTitleInput.trim() || undefined);
+      setActionNotice(`Audit '${res.title}' completed with status: ${res.status.toUpperCase()}`);
+      setSelectedAudit(res);
+      setAuditPathsInput('');
+      setAuditTitleInput('');
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Shipment audit failed: ${err.message}`);
+    } finally {
+      setIsAuditing(false);
+    }
+  };
+
+  const handleSelectAudit = async (auditId: string) => {
+    try {
+      const full = await fetchShipmentAudit(auditId);
+      setSelectedAudit(full);
+    } catch (err: any) {
+      setActionNotice(`Failed to load audit: ${err.message}`);
+    }
+  };
+
+  const handleExportReport = async (auditId: string) => {
+    try {
+      setActionNotice('Generating compliance report...');
+      const md = await exportAuditReport(auditId);
+      setReportModalContent(md);
+      setActionNotice('Audit report generated.');
+    } catch (err: any) {
+      setActionNotice(`Export error: ${err.message}`);
     }
   };
 
@@ -362,7 +427,7 @@ export default function App() {
     { id: 'organizer', label: 'File Organizer', icon: FolderTree },
     { id: 'lazydesk', label: 'LazyDesk Automation', icon: Clock, badge: watches.filter(w => !w.is_paused).length },
     { id: 'inbox', label: 'Inbox & Notes', icon: Inbox, badge: inboxItems.length },
-    { id: 'tradesloth', label: 'TradeSloth Auditor', icon: Scale },
+    { id: 'tradesloth', label: 'TradeSloth Auditor', icon: Scale, badge: shipmentAudits.filter(a => a.status === 'discrepancies_found').length },
     { id: 'copilot', label: 'Local Copilot', icon: Bot },
     { id: 'approvals', label: 'Approvals', icon: CheckCircle2, badge: pendingPlans.length },
     { id: 'tasks', label: 'Task History', icon: ListTodo },
@@ -1243,6 +1308,366 @@ export default function App() {
                   )}
                 </div>
               </div>
+            </div>
+          )}
+
+          {activeTab === 'tradesloth' && (
+            <div className="space-y-6 max-w-6xl mx-auto">
+              {/* Legal Disclaimer Alert */}
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-300 flex items-start gap-3 shadow-lg">
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="font-bold text-amber-200 uppercase tracking-wider text-[11px]">
+                    Statutory & Customs Compliance Notice
+                  </div>
+                  <p className="leading-relaxed text-amber-300/90 text-[11px]">
+                    TradeSloth performs deterministic multi-document text extraction and decimal cross-comparison. It does NOT constitute legal, regulatory, or export/customs compliance verification. Always have shipping documentation reviewed by a licensed customs broker or freight forwarder before filing.
+                  </p>
+                </div>
+              </div>
+
+              {/* Trigger Cross-Audit Card */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Scale className="w-4 h-4 text-amber-400" />
+                      Shipment Document Cross-Audit
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Cross-compare 2 or more shipment documents (PDF, DOCX, XLSX, TXT) across approved roots. Compares references, package counts, weights, and values with exact decimal arithmetic.
+                    </p>
+                  </div>
+                  <span className="px-2.5 py-1 rounded text-xs font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    Decimal Arithmetic
+                  </span>
+                </div>
+
+                <form onSubmit={handleRunAudit} className="space-y-3 pt-2">
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-medium text-slate-300">
+                      Document Paths (one per line, within approved roots)
+                    </label>
+                    <textarea
+                      rows={3}
+                      placeholder="e.g.&#10;C:\Users\RAHUL\Documents\Shipments\Commercial_Invoice.pdf&#10;C:\Users\RAHUL\Documents\Shipments\Packing_List.xlsx&#10;C:\Users\RAHUL\Documents\Shipments\Bill_of_Lading.pdf"
+                      value={auditPathsInput}
+                      onChange={(e) => setAuditPathsInput(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      placeholder="Audit Title (e.g. Shipment MSCU-440192)"
+                      value={auditTitleInput}
+                      onChange={(e) => setAuditTitleInput(e.target.value)}
+                      className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isAuditing || !auditPathsInput.trim()}
+                      className="px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition disabled:opacity-50 shadow-lg shadow-amber-500/20"
+                    >
+                      {isAuditing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Scale className="w-3.5 h-3.5" />}
+                      <span>{isAuditing ? 'Auditing...' : 'Run Shipment Cross-Audit'}</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Two-Column Audit Matrix & History */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Left: Audit History */}
+                <div className="lg:col-span-4 rounded-xl border border-slate-800 bg-[#111726]/60 p-4 space-y-3">
+                  <div className="text-[11px] font-medium text-slate-400 flex items-center justify-between px-1">
+                    <span>Audit History ({shipmentAudits.length})</span>
+                    <button
+                      onClick={loadData}
+                      className="text-slate-400 hover:text-white flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3 h-3" /> Refresh
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+                    {shipmentAudits.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-500 border border-slate-800/80 rounded-lg">
+                        No shipment audits performed yet. Enter document paths above to begin.
+                      </div>
+                    ) : (
+                      shipmentAudits.map((aud) => {
+                        const isSelected = selectedAudit?.id === aud.id;
+                        const isClean = aud.status === 'clean';
+                        return (
+                          <div
+                            key={aud.id}
+                            onClick={() => handleSelectAudit(aud.id)}
+                            className={`p-3.5 rounded-lg border text-xs cursor-pointer transition ${
+                              isSelected
+                                ? 'bg-amber-950/20 border-amber-500/50 shadow-sm'
+                                : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                                  isClean
+                                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                    : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                                }`}
+                              >
+                                {isClean ? 'CLEAN (MATCHING)' : 'DISCREPANCIES'}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                {aud.created_at.slice(5, 10)}
+                              </span>
+                            </div>
+
+                            <div className="font-semibold text-white truncate" title={aud.title}>
+                              {aud.title}
+                            </div>
+
+                            <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-between font-mono">
+                              <span>{aud.summary.total_documents} documents</span>
+                              <span>{aud.summary.discrepancies} variance(s)</span>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Right: Selected Audit Matrix Details */}
+                <div className="lg:col-span-8 space-y-4">
+                  {!selectedAudit ? (
+                    <div className="rounded-xl border border-slate-800 bg-[#111726]/40 p-12 text-center text-slate-400">
+                      <Scale className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                      <h4 className="text-sm font-semibold text-white">No Audit Selected</h4>
+                      <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                        Select a past shipment audit from the list or submit document paths above to view the discrepancy matrix.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Audit Header Card */}
+                      <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 space-y-4">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${
+                                  selectedAudit.status === 'clean'
+                                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                    : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                                }`}
+                              >
+                                {selectedAudit.status.replace('_', ' ')}
+                              </span>
+                              <span className="text-[11px] font-mono text-slate-500">
+                                ID: {selectedAudit.id.slice(0, 8)}
+                              </span>
+                            </div>
+                            <h3 className="text-base font-bold text-white mt-1">
+                              {selectedAudit.title}
+                            </h3>
+                            <p className="text-xs text-slate-400 font-mono">
+                              Generated {selectedAudit.created_at.slice(0, 19).replace('T', ' ')} UTC
+                            </p>
+                          </div>
+
+                          <button
+                            onClick={() => handleExportReport(selectedAudit.id)}
+                            className="px-4 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 transition"
+                          >
+                            <Download className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Export Report (.md)</span>
+                          </button>
+                        </div>
+
+                        {/* Documents Audited */}
+                        <div>
+                          <h4 className="text-xs font-semibold text-slate-300 mb-2">
+                            Audited Shipment Documents ({selectedAudit.summary.documents.length})
+                          </h4>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {selectedAudit.summary.documents.map((doc, idx) => (
+                              <div
+                                key={idx}
+                                className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 text-xs space-y-1"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="font-semibold text-white truncate max-w-[180px]" title={doc.filename}>
+                                    {doc.filename}
+                                  </span>
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-mono bg-blue-500/20 text-blue-300">
+                                    {doc.document_type}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-500 font-mono truncate" title={doc.path}>
+                                  {doc.path}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Summary Metrics */}
+                        <div className="grid grid-cols-4 gap-2 pt-1 border-t border-slate-800 text-center">
+                          <div className="p-2 rounded bg-slate-900/50">
+                            <div className="text-base font-bold text-white">{selectedAudit.summary.total_findings}</div>
+                            <div className="text-[10px] text-slate-400">Total Fields</div>
+                          </div>
+                          <div className="p-2 rounded bg-slate-900/50">
+                            <div className="text-base font-bold text-emerald-400">{selectedAudit.summary.verified}</div>
+                            <div className="text-[10px] text-slate-400">Verified</div>
+                          </div>
+                          <div className="p-2 rounded bg-slate-900/50">
+                            <div className="text-base font-bold text-rose-400">{selectedAudit.summary.discrepancies}</div>
+                            <div className="text-[10px] text-slate-400">Variances</div>
+                          </div>
+                          <div className="p-2 rounded bg-slate-900/50">
+                            <div className="text-base font-bold text-amber-400">{selectedAudit.summary.missing}</div>
+                            <div className="text-[10px] text-slate-400">Unpaired</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Discrepancy Findings Matrix */}
+                      <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+                            Cross-Document Discrepancy Matrix
+                          </h4>
+                          <span className="text-[11px] text-slate-500">Deterministic Decimal Comparison</span>
+                        </div>
+
+                        {(!selectedAudit.findings || selectedAudit.findings.length === 0) ? (
+                          <div className="p-4 text-center text-xs text-slate-500">
+                            No field findings recorded for this audit.
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {selectedAudit.findings.map((f, idx) => {
+                              const isMatch = f.status === 'verified';
+                              const isInconsistent = f.status === 'inconsistent';
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`p-4 rounded-xl border text-xs space-y-2.5 transition ${
+                                    isMatch
+                                      ? 'bg-slate-900/60 border-slate-800'
+                                      : isInconsistent
+                                      ? 'bg-rose-950/20 border-rose-500/40'
+                                      : 'bg-amber-950/20 border-amber-500/30'
+                                  }`}
+                                >
+                                  {/* Finding Header */}
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-white text-sm capitalize">
+                                        {f.field_name.replace(/_/g, ' ')}
+                                      </span>
+                                      <span
+                                        className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${
+                                          isMatch
+                                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                            : isInconsistent
+                                            ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                        }`}
+                                      >
+                                        {f.status ? f.status.toUpperCase() : f.severity.toUpperCase()}
+                                      </span>
+                                    </div>
+
+                                    {f.difference && f.difference !== '0' && f.difference !== '0.00' && (
+                                      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-500/30 text-rose-300 border border-rose-500/40">
+                                        Variance: {f.difference}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Values Across Audited Documents */}
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80">
+                                    {Object.entries(f.extracted_values).map(([docName, val]) => (
+                                      <div key={docName} className="flex items-center justify-between text-[11px]">
+                                        <span className="text-slate-400 font-mono truncate max-w-[160px]" title={docName}>
+                                          {docName}:
+                                        </span>
+                                        <span className="font-semibold text-white font-mono">{val}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+
+                                  {/* Evidence Reference */}
+                                  {f.evidence_reference && (
+                                    <p className="text-[11px] text-slate-400 italic bg-slate-900/50 p-2 rounded border border-slate-800">
+                                      {f.evidence_reference}
+                                    </p>
+                                  )}
+
+                                  {/* Action Advice */}
+                                  <div className="text-[11px] text-emerald-400 flex items-center gap-1.5 font-medium">
+                                    <span>→ {f.recommended_action}</span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Standalone Report Modal */}
+              {reportModalContent && (
+                <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+                  <div className="bg-[#111726] border border-slate-700 rounded-2xl max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+                    <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                      <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                        <FileSpreadsheet className="w-4 h-4 text-amber-400" />
+                        Exported TradeSloth Audit Report (Markdown)
+                      </h4>
+                      <button
+                        onClick={() => setReportModalContent(null)}
+                        className="p-1 rounded text-slate-400 hover:text-white"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="p-4 overflow-y-auto flex-1 font-mono text-xs text-slate-300 bg-slate-950 whitespace-pre-wrap leading-relaxed select-text">
+                      {reportModalContent}
+                    </div>
+
+                    <div className="p-4 border-t border-slate-800 flex items-center justify-between bg-slate-900/40">
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(reportModalContent);
+                          setActionNotice('Report copied to clipboard.');
+                        }}
+                        className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs flex items-center gap-1.5"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy Markdown</span>
+                      </button>
+
+                      <button
+                        onClick={() => setReportModalContent(null)}
+                        className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

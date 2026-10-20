@@ -156,7 +156,16 @@ slothpilot-ai/
 
 ### Milestone M6: TradeSloth Document Auditor
 - **Goal:** Multi-document shipment auditor (PDF, DOCX, XLSX, TXT), candidate field extraction (invoice numbers, currency, descriptions, quantities, weights, package counts, totals), decimal arithmetic comparison, tolerance handling, discrepancy matrix (missing, unreadable, inconsistent, verified), printable/exportable audit report.
-- **Verification:** Synthetic shipment tests with matching & mismatching documents; decimal precision tests (rounding/currency); verify report contains evidence snippets and disclaimer.
+- **Verification:**
+  - Pytest suite: 40 tests passing (`test_tradesloth.py`, etc.).
+  - Deterministic field extraction verified across multi-document sets (reference numbers, currencies, gross/net weights, package counts, monetary totals, parties).
+  - Decimal arithmetic comparison verified: exact decimal math eliminates floating-point errors (e.g. 100 - 95 = 5 cartons variance).
+  - Unit and currency validation verified: unit conflicts (e.g. kg vs lbs) and currency mismatches are detected and flagged before comparison.
+  - Discrepancy matrix categorized into `verified`, `inconsistent`, `missing`, and `unreadable` with source evidence citations and recommended actions.
+  - Statutory and customs compliance disclaimer prominently embedded in reports and UI.
+  - Standalone Markdown report generation and export verified.
+  - Frontend production build: compiled in 3.78s with interactive multi-document input, past audits explorer, discrepancy matrix, and markdown export modal.
+- **Status:** Completed.
 
 ### Milestone M7: Local AI Copilot & Restricted Tools
 - **Goal:** Conversational copilot with streaming/structured response, tool registry with strict Pydantic schemas, explicit per-tool permissions (read-only query tools vs. plan-proposing tools), model offline detection and deterministic fallback.

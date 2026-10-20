@@ -8,7 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.config import settings
 from backend.app.db.migrations import run_migrations
-from backend.app.routers import health, settings as settings_router, audit, organizer, approvals, tasks, watcher, inbox
+from backend.app.routers import health, settings as settings_router, audit, organizer, approvals, tasks, watcher, inbox, tradesloth
 from backend.app.services.folder_watcher import folder_watcher_service
 
 # Setup logging
@@ -125,3 +125,4 @@ app.include_router(approvals.router)
 app.include_router(tasks.router)
 app.include_router(watcher.router)
 app.include_router(inbox.router)
+app.include_router(tradesloth.router)
