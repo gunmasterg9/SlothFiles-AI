@@ -105,7 +105,10 @@ slothpilot-ai/
 
 ### Milestone M1: Project Skeleton, Local Configuration & Health Checks
 - **Goal:** FastAPI backend skeleton, Pydantic settings, loopback-only binding, CORS restriction, `/api/health` and `/api/ready`, React frontend skeleton with tab navigation and health banner.
-- **Verification:** Pytest suite passes; `curl http://127.0.0.1:8000/api/health` returns status `ok`; frontend builds and displays live health indicator.
+- **Verification:**
+  - Pytest suite: 4 tests passed (`test_health_endpoint`, `test_ready_endpoint`, `test_dns_rebinding_protection`, `test_structured_404_error`).
+  - Frontend production build: Vite/TypeScript compilation succeeded in 2.32s with zero errors.
+- **Status:** Completed.
 
 ### Milestone M2: Ollama Integration, Settings, SQLite & Audit Infrastructure
 - **Goal:** Local Ollama API client (no cloud fallback, real model discovery, timeouts, structured errors), SQLite versioned migrations, approved roots manager, append-only audit log service.
