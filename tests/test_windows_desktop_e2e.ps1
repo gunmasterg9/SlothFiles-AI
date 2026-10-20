@@ -191,6 +191,7 @@ print(f'RULES_COUNT={count}')
 # -----------------------------------------------------------------------------
 # Test 10: Edge Browser Detection and Path Resolution
 # -----------------------------------------------------------------------------
+Assert-Test "10. Edge Browser Detection and Path Resolution" {
     $edgePaths = @(
         "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
         "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",

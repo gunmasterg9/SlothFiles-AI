@@ -46,7 +46,8 @@ import {
   HelpCircle,
   Plus,
   Pencil,
-  Eye
+  Eye,
+  Menu
 } from 'lucide-react';
 import {
   fetchHealth,
@@ -246,8 +247,15 @@ export default function App() {
   const [modalPreviewDestination, setModalPreviewDestination] = useState<string>('');
   const [modalPreviewError, setModalPreviewError] = useState<string | null>(null);
 
-  // Interactive Test-a-Rule Sandbox
-  const [showTestSandbox, setShowTestSandbox] = useState<boolean>(true);
+  // Mobile drawer state
+  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+
+  // Task Cancel confirmation
+  const [cancelTaskTarget, setCancelTaskTarget] = useState<TaskRecord | null>(null);
+  const [isCancellingTask, setIsCancellingTask] = useState<boolean>(false);
+
+  // Interactive Test-a-Rule Sandbox (collapsed by default for clean view of pipeline)
+  const [showTestSandbox, setShowTestSandbox] = useState<boolean>(false);
   const [showVariableGuide, setShowVariableGuide] = useState<boolean>(false);
   const [testFilename, setTestFilename] = useState<string>('contract_agreement_v2.pdf');
   const [testCategory, setTestCategory] = useState<string>('Contracts & Legal');
@@ -301,10 +309,11 @@ export default function App() {
   const [isCopilotLoading, setIsCopilotLoading] = useState<boolean>(false);
   const [copilotTools, setCopilotTools] = useState<CopilotTool[]>([]);
 
-  const loadData = async () => {
+  const loadData = useCallback(async (searchQueryOverride?: unknown) => {
     try {
       setLoading(true);
       setError(null);
+      const query = typeof searchQueryOverride === 'string' ? searchQueryOverride : inboxSearchQuery;
       const [h, r, s, m, a, p, w, t, inb, aud, rls, tpls] = await Promise.all([
         fetchHealth().catch(() => null),
         fetchReadiness().catch(() => null),
@@ -314,7 +323,7 @@ export default function App() {
         fetchPendingApprovals().catch(() => []),
         fetchWatches().catch(() => []),
         fetchTasks(undefined, 20).catch(() => []),
-        fetchInboxItems(inboxSearchQuery || undefined).catch(() => []),
+        fetchInboxItems(query || undefined).catch(() => []),
         fetchShipmentAudits().catch(() => []),
         fetchOrganizationRules().catch(() => []),
         fetchTemplateVariables().catch(() => null)
@@ -324,10 +333,8 @@ export default function App() {
       if (r) setReadiness(r);
       if (s) {
         setSystemSettings(s);
-        if (!scanFolderInput && s.approved_roots.length > 0) {
-          setScanFolderInput(s.approved_roots[0].path);
-          setWatchFolderInput(s.approved_roots[0].path);
-        }
+        setScanFolderInput((prev) => (!prev && s.approved_roots.length > 0 ? s.approved_roots[0].path : prev));
+        setWatchFolderInput((prev) => (!prev && s.approved_roots.length > 0 ? s.approved_roots[0].path : prev));
       }
       if (m) setModelsData(m);
       if (a) {
@@ -355,8 +362,10 @@ export default function App() {
       }
       if (aud) {
         setShipmentAudits(aud);
-        if (!selectedAudit && aud.length > 0) {
-          fetchShipmentAudit(aud[0].id).then((full) => setSelectedAudit(full)).catch(() => {});
+        if (aud.length > 0) {
+          fetchShipmentAudit(aud[0].id).then((full) => {
+            setSelectedAudit((prev) => prev || full);
+          }).catch(() => {});
         }
       }
     } catch (err: any) {
@@ -364,6 +373,11 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  }, [inboxSearchQuery]);
+
+  const handleSearchInbox = (queryOverride?: string) => {
+    const q = queryOverride !== undefined ? queryOverride : inboxSearchQuery;
+    loadData(q);
   };
 
   const handleRunAudit = async (e: React.FormEvent) => {
@@ -449,7 +463,7 @@ export default function App() {
     setTimeout(() => setCopiedDraft(false), 2000);
   };
 
-  const loadCopilotData = async (preferredSessionId?: string) => {
+  const loadCopilotData = useCallback(async (preferredSessionId?: string) => {
     try {
       const [sessions, tools] = await Promise.all([
         fetchCopilotSessions().catch(() => []),
@@ -470,7 +484,7 @@ export default function App() {
     } catch (err: any) {
       console.error('Failed to load copilot data:', err);
     }
-  };
+  }, [activeSessionId]);
 
   const handleCreateSession = async () => {
     try {
@@ -543,15 +557,25 @@ export default function App() {
 
   useEffect(() => {
     if (activeTab === 'copilot') {
-      loadCopilotData();
+      const timer = setTimeout(() => {
+        loadCopilotData();
+      }, 0);
+      return () => clearTimeout(timer);
     }
-  }, [activeTab]);
+  }, [activeTab, loadCopilotData]);
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    const timer = setTimeout(() => {
+      loadData();
+    }, 0);
+    const interval = setInterval(() => {
+      loadData();
+    }, 10000);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, [loadData]);
 
   const loadRules = async () => {
     try {
@@ -822,14 +846,17 @@ export default function App() {
       return;
     }
 
-    // Trigger immediate fetch upon opening LazyDesk or resuming polling
-    fetchEvents(true);
+    // Schedule initial fetch upon opening LazyDesk or resuming polling
+    const timer = setTimeout(() => {
+      fetchEvents(true);
+    }, 0);
 
     const intervalId = setInterval(() => {
       fetchEvents(false);
     }, 1500);
 
     return () => {
+      clearTimeout(timer);
       clearInterval(intervalId);
     };
   }, [activeTab, isWatcherPolling, fetchEvents]);
@@ -878,13 +905,22 @@ export default function App() {
     deleted: watcherEvents.filter((e) => e.event_type === 'deleted').length
   };
 
-  const handleCancelTask = async (taskId: string) => {
+  const handleRequestCancelTask = (task: TaskRecord) => {
+    setCancelTaskTarget(task);
+  };
+
+  const handleConfirmCancelTask = async () => {
+    if (!cancelTaskTarget) return;
     try {
-      await cancelTask(taskId);
-      setActionNotice(`Task ${taskId.slice(0, 8)} cancelled.`);
+      setIsCancellingTask(true);
+      await cancelTask(cancelTaskTarget.id);
+      setActionNotice(`Task ${cancelTaskTarget.id.slice(0, 8)} cancelled.`);
+      setCancelTaskTarget(null);
       await loadData();
     } catch (err: any) {
       setActionNotice(`Cancel error: ${err.message}`);
+    } finally {
+      setIsCancellingTask(false);
     }
   };
 
@@ -942,20 +978,41 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-[#0b0f17] text-slate-100 font-sans overflow-hidden">
+      {/* Mobile Backdrop Overlay */}
+      {mobileMenuOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm md:hidden"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
       {/* Sidebar Navigation */}
-      <aside className="w-64 bg-[#111726] border-r border-slate-800 flex flex-col justify-between select-none">
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-[#111726] border-r border-slate-800 flex flex-col justify-between select-none transition-transform duration-200 ease-in-out md:static md:translate-x-0 ${
+          mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
         <div>
           {/* Logo Brand */}
-          <div className="p-5 flex items-center space-x-3 border-b border-slate-800">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/40">
-              <span className="text-xl">🦥</span>
+          <div className="p-5 flex items-center justify-between border-b border-slate-800">
+            <div className="flex items-center space-x-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/40">
+                <span className="text-xl">🦥</span>
+              </div>
+              <div>
+                <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-1.5">
+                  SlothPilot <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">AI</span>
+                </h1>
+                <p className="text-[11px] text-slate-400 font-medium">One AI. Less effort.</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-1.5">
-                SlothPilot <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">AI</span>
-              </h1>
-              <p className="text-[11px] text-slate-400 font-medium">One AI. Less effort.</p>
-            </div>
+            <button
+              onClick={() => setMobileMenuOpen(false)}
+              className="p-1 rounded text-slate-400 hover:text-white md:hidden"
+              aria-label="Close menu"
+            >
+              <X className="w-5 h-5" />
+            </button>
           </div>
 
           {/* Navigation Links */}
@@ -966,7 +1023,10 @@ export default function App() {
               return (
                 <button
                   key={item.id}
-                  onClick={() => setActiveTab(item.id as Tab)}
+                  onClick={() => {
+                    setActiveTab(item.id as Tab);
+                    setMobileMenuOpen(false);
+                  }}
                   className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all ${
                     isActive
                       ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-sm'
@@ -1015,13 +1075,20 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col min-w-0 bg-[#0b0f17] overflow-hidden">
         {/* Top Header Bar */}
-        <header className="h-14 border-b border-slate-800 px-6 flex items-center justify-between bg-[#111726]/40 backdrop-blur">
+        <header className="h-14 border-b border-slate-800 px-4 md:px-6 flex items-center justify-between bg-[#111726]/40 backdrop-blur shrink-0">
           <div className="flex items-center space-x-3">
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white md:hidden"
+              aria-label="Toggle navigation menu"
+            >
+              {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+            </button>
             <h2 className="text-sm font-semibold text-slate-200 capitalize">
               {navItems.find((n) => n.id === activeTab)?.label}
             </h2>
-            <span className="text-xs text-slate-500">|</span>
-            <span className="text-xs text-slate-400">Offline-first local automation</span>
+            <span className="text-xs text-slate-500 hidden sm:inline">|</span>
+            <span className="text-xs text-slate-400 hidden sm:inline">Offline-first local automation</span>
           </div>
 
           <div className="flex items-center space-x-3">
@@ -1033,7 +1100,7 @@ export default function App() {
             )}
 
             <button
-              onClick={loadData}
+              onClick={() => loadData()}
               disabled={loading}
               title="Refresh data"
               className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700 transition"
@@ -1301,44 +1368,61 @@ export default function App() {
                       </p>
                     </div>
 
-                    <form onSubmit={handleScan} className="space-y-3 pt-2">
-                      <div className="flex gap-2">
-                        <select
-                          value={scanFolderInput}
-                          onChange={(e) => setScanFolderInput(e.target.value)}
-                          className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
-                        >
-                          <option value="">-- Select an approved root --</option>
-                          {systemSettings?.approved_roots.map((r) => (
-                            <option key={r.id} value={r.path}>
-                              {r.label} ({r.path})
-                            </option>
-                          ))}
-                        </select>
-
+                    {!systemSettings?.approved_roots.length ? (
+                      <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span>No approved folder roots have been configured yet. Add a root to scan and organize files.</span>
+                        </div>
                         <button
-                          type="submit"
-                          disabled={isScanning || !scanFolderInput}
-                          className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-2 transition disabled:opacity-50"
+                          type="button"
+                          onClick={() => setActiveTab('settings')}
+                          className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shrink-0"
                         >
-                          {isScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                          <span>{isScanning ? 'Analyzing...' : 'Scan & Plan'}</span>
+                          <FolderPlus className="w-3.5 h-3.5" />
+                          <span>Go to Settings</span>
                         </button>
                       </div>
+                    ) : (
+                      <form onSubmit={handleScan} className="space-y-3 pt-2">
+                        <div className="flex gap-2">
+                          <select
+                            value={scanFolderInput}
+                            onChange={(e) => setScanFolderInput(e.target.value)}
+                            className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
+                          >
+                            <option value="">-- Select an approved root --</option>
+                            {systemSettings.approved_roots.map((r) => (
+                              <option key={r.id} value={r.path}>
+                                {r.label} ({r.path})
+                              </option>
+                            ))}
+                          </select>
 
-                      <div className="flex items-center gap-2 text-xs text-slate-400">
-                        <input
-                          type="checkbox"
-                          id="ai-classify"
-                          checked={useAiClassification}
-                          onChange={(e) => setUseAiClassification(e.target.checked)}
-                          className="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-0"
-                        />
-                        <label htmlFor="ai-classify" className="cursor-pointer select-none">
-                          Enable local open-weight AI fallback classification ({systemSettings?.ollama_selected_model || 'Ollama'}) if no rules match
-                        </label>
-                      </div>
-                    </form>
+                          <button
+                            type="submit"
+                            disabled={isScanning || !scanFolderInput}
+                            className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-2 transition disabled:opacity-50"
+                          >
+                            {isScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                            <span>{isScanning ? 'Analyzing...' : 'Scan & Plan'}</span>
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-2 text-xs text-slate-400">
+                          <input
+                            type="checkbox"
+                            id="ai-classify"
+                            checked={useAiClassification}
+                            onChange={(e) => setUseAiClassification(e.target.checked)}
+                            className="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-0"
+                          />
+                          <label htmlFor="ai-classify" className="cursor-pointer select-none">
+                            Enable local open-weight AI fallback classification ({systemSettings?.ollama_selected_model || 'Ollama'}) if no rules match
+                          </label>
+                        </div>
+                      </form>
+                    )}
                   </div>
 
                   {latestScanResult && latestScanResult.plan && (
@@ -1451,7 +1535,7 @@ export default function App() {
                         }`}
                       >
                         <HelpCircle className="w-3.5 h-3.5" />
-                        <span>Variable Guide</span>
+                        <span>Variable Guide {showVariableGuide ? '▲' : '▼'}</span>
                       </button>
 
                       <button
@@ -1463,7 +1547,7 @@ export default function App() {
                         }`}
                       >
                         <Eye className="w-3.5 h-3.5" />
-                        <span>Test-a-Rule Sandbox</span>
+                        <span>Test Sandbox {showTestSandbox ? '▲' : '▼'}</span>
                       </button>
 
                       <button
@@ -2097,10 +2181,7 @@ export default function App() {
                       {watcherEvents.length}
                     </span>
                     {isWatcherPolling && (
-                      <span className="relative flex h-2 w-2">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                      </span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block ml-0.5" title="Live polling active" />
                     )}
                   </button>
 
@@ -2688,29 +2769,47 @@ export default function App() {
                 </div>
 
                 {/* Import Form */}
-                <form onSubmit={handleImportInbox} className="flex flex-col sm:flex-row gap-2 pt-2">
-                  <input
-                    type="text"
-                    placeholder="Full path to .txt, .md, or .eml file within approved roots"
-                    value={inboxImportPath}
-                    onChange={(e) => setInboxImportPath(e.target.value)}
-                    className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Custom title (optional)"
-                    value={inboxImportTitle}
-                    onChange={(e) => setInboxImportTitle(e.target.value)}
-                    className="sm:w-56 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
-                  />
-                  <button
-                    type="submit"
-                    disabled={isImportingInbox || !inboxImportPath}
-                    className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs flex items-center justify-center gap-1.5 transition disabled:opacity-50"
-                  >
-                    {isImportingInbox ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FolderPlus className="w-3.5 h-3.5" />}
-                    <span>{isImportingInbox ? 'Importing...' : 'Import Document'}</span>
-                  </button>
+                <form onSubmit={handleImportInbox} className="space-y-2 pt-2">
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      placeholder="Full path to .txt, .md, or .eml file within approved roots"
+                      value={inboxImportPath}
+                      onChange={(e) => setInboxImportPath(e.target.value)}
+                      className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Custom title (optional)"
+                      value={inboxImportTitle}
+                      onChange={(e) => setInboxImportTitle(e.target.value)}
+                      className="sm:w-56 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isImportingInbox || !inboxImportPath}
+                      className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                    >
+                      {isImportingInbox ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FolderPlus className="w-3.5 h-3.5" />}
+                      <span>{isImportingInbox ? 'Importing...' : 'Import Document'}</span>
+                    </button>
+                  </div>
+
+                  {systemSettings?.approved_roots && systemSettings.approved_roots.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
+                      <span className="text-[10px] text-slate-400 mr-1">Insert approved root:</span>
+                      {systemSettings.approved_roots.map((r) => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setInboxImportPath(`${r.path}\\`)}
+                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-purple-300 border border-slate-700 transition"
+                        >
+                          + {r.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </form>
               </div>
 
@@ -2718,24 +2817,47 @@ export default function App() {
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
                 {/* Left: Document List & Search */}
                 <div className="lg:col-span-4 rounded-xl border border-slate-800 bg-[#111726]/60 p-4 space-y-3">
-                  <div className="relative">
-                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+                  <div className="relative flex items-center">
+                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5 pointer-events-none" />
                     <input
                       type="text"
                       placeholder="Search title or text..."
                       value={inboxSearchQuery}
                       onChange={(e) => setInboxSearchQuery(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter') loadData();
+                        if (e.key === 'Enter') handleSearchInbox();
                       }}
-                      className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                      className="w-full pl-8 pr-16 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
                     />
+                    <div className="absolute right-1.5 top-1.5 flex items-center gap-1">
+                      {inboxSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInboxSearchQuery('');
+                            handleSearchInbox('');
+                          }}
+                          className="p-1 rounded text-slate-400 hover:text-white"
+                          title="Clear search"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleSearchInbox()}
+                        className="px-1.5 py-0.5 rounded bg-purple-600/30 text-purple-300 border border-purple-500/30 text-[10px] hover:bg-purple-600 hover:text-white transition"
+                        title="Search"
+                      >
+                        Go
+                      </button>
+                    </div>
                   </div>
 
                   <div className="text-[11px] font-medium text-slate-400 flex items-center justify-between px-1">
                     <span>Imported Items ({inboxItems.length})</span>
                     <button
-                      onClick={loadData}
+                      onClick={() => loadData()}
                       className="text-slate-400 hover:text-white flex items-center gap-1"
                     >
                       <RefreshCw className="w-3 h-3" /> Refresh
@@ -3048,9 +3170,20 @@ export default function App() {
 
                 <form onSubmit={handleRunAudit} className="space-y-3 pt-2">
                   <div className="space-y-1.5">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Document Paths (one per line, within approved roots)
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-medium text-slate-300">
+                        Document Paths (one per line, within approved roots)
+                      </label>
+                      {auditPathsInput && (
+                        <button
+                          type="button"
+                          onClick={() => setAuditPathsInput('')}
+                          className="text-[10px] text-slate-400 hover:text-white"
+                        >
+                          Clear Paths
+                        </button>
+                      )}
+                    </div>
                     <textarea
                       rows={3}
                       placeholder="e.g.&#10;C:\Users\RAHUL\Documents\Shipments\Commercial_Invoice.pdf&#10;C:\Users\RAHUL\Documents\Shipments\Packing_List.xlsx&#10;C:\Users\RAHUL\Documents\Shipments\Bill_of_Lading.pdf"
@@ -3058,6 +3191,25 @@ export default function App() {
                       onChange={(e) => setAuditPathsInput(e.target.value)}
                       className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
                     />
+                    {systemSettings?.approved_roots && systemSettings.approved_roots.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
+                        <span className="text-[10px] text-slate-400 mr-1">Insert approved root:</span>
+                        {systemSettings.approved_roots.map((r) => (
+                          <button
+                            key={r.id}
+                            type="button"
+                            onClick={() => {
+                              const trimmed = auditPathsInput.trim();
+                              const sep = trimmed.length > 0 ? '\n' : '';
+                              setAuditPathsInput(`${trimmed}${sep}${r.path}\\`);
+                            }}
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-amber-300 border border-slate-700 transition"
+                          >
+                            + {r.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-col sm:flex-row gap-2">
@@ -3087,7 +3239,7 @@ export default function App() {
                   <div className="text-[11px] font-medium text-slate-400 flex items-center justify-between px-1">
                     <span>Audit History ({shipmentAudits.length})</span>
                     <button
-                      onClick={loadData}
+                      onClick={() => loadData()}
                       className="text-slate-400 hover:text-white flex items-center gap-1"
                     >
                       <RefreshCw className="w-3 h-3" /> Refresh
@@ -3750,6 +3902,14 @@ export default function App() {
                       Cooperative background tasks with progress tracking, error logs, and user cancellation.
                     </p>
                   </div>
+                  <button
+                    onClick={() => loadData()}
+                    className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs flex items-center gap-1.5 transition"
+                    title="Refresh task records"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Refresh</span>
+                  </button>
                 </div>
 
                 <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900/40">
@@ -3810,8 +3970,9 @@ export default function App() {
                             <td className="p-2.5">
                               {(task.status === 'queued' || task.status === 'running') && (
                                 <button
-                                  onClick={() => handleCancelTask(task.id)}
+                                  onClick={() => handleRequestCancelTask(task)}
                                   className="px-2 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-[10px] font-medium flex items-center gap-1 transition"
+                                  title="Cancel running task"
                                 >
                                   <StopCircle className="w-3 h-3" />
                                   <span>Cancel</span>
@@ -3825,6 +3986,51 @@ export default function App() {
                   </table>
                 </div>
               </div>
+
+              {/* Cancel Task Confirmation Modal */}
+              {cancelTaskTarget && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                  <div className="bg-[#111726] border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+                    <div className="flex items-center gap-3 text-rose-400">
+                      <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
+                        <StopCircle className="w-5 h-5 text-rose-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white">Cancel Background Task?</h3>
+                        <p className="text-[11px] text-slate-400 font-mono">
+                          ID: {cancelTaskTarget.id.slice(0, 8)} • Type: {cancelTaskTarget.task_type.toUpperCase()}
+                        </p>
+                      </div>
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      Are you sure you want to cancel this background task? Partial operations will be safely terminated.
+                    </p>
+                    <div className="flex justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setCancelTaskTarget(null)}
+                        disabled={isCancellingTask}
+                        className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+                      >
+                        Keep Running
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleConfirmCancelTask}
+                        disabled={isCancellingTask}
+                        className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition flex items-center gap-1.5 shadow disabled:opacity-50"
+                      >
+                        {isCancellingTask ? (
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <StopCircle className="w-3.5 h-3.5" />
+                        )}
+                        <span>Abort Task</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
