@@ -18,7 +18,11 @@ import {
   FolderPlus,
   Trash2,
   Check,
-  FileCheck
+  FileCheck,
+  Play,
+  RotateCcw,
+  X,
+  ChevronRight
 } from 'lucide-react';
 import {
   fetchHealth,
@@ -29,11 +33,18 @@ import {
   addApprovedRoot,
   removeApprovedRoot,
   fetchAuditLogs,
+  scanFolder,
+  fetchPendingApprovals,
+  approvePlan,
+  rejectPlan,
+  undoPlan,
   type HealthResponse,
   type ReadinessResponse,
   type SystemSettings,
   type ModelsResponse,
-  type AuditLogEntry
+  type AuditLogEntry,
+  type ActionPlan,
+  type ScanResult
 } from './services/api';
 
 type Tab =
@@ -55,34 +66,49 @@ export default function App() {
   const [modelsData, setModelsData] = useState<ModelsResponse | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [totalAuditLogs, setTotalAuditLogs] = useState<number>(0);
+  const [pendingPlans, setPendingPlans] = useState<ActionPlan[]>([]);
+  const [completedPlans, setCompletedPlans] = useState<ActionPlan[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
   // Settings form states
   const [newRootPath, setNewRootPath] = useState<string>('');
   const [newRootLabel, setNewRootLabel] = useState<string>('');
-  const [settingActionMsg, setSettingActionMsg] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+
+  // Organizer scan states
+  const [scanFolderInput, setScanFolderInput] = useState<string>('');
+  const [useAiClassification, setUseAiClassification] = useState<boolean>(true);
+  const [isScanning, setIsScanning] = useState<boolean>(false);
+  const [latestScanResult, setLatestScanResult] = useState<ScanResult | null>(null);
 
   const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
-      const [h, r, s, m, a] = await Promise.all([
+      const [h, r, s, m, a, p] = await Promise.all([
         fetchHealth().catch(() => null),
         fetchReadiness().catch(() => null),
         fetchSettings().catch(() => null),
         fetchModels().catch(() => null),
-        fetchAuditLogs(undefined, 10, 0).catch(() => ({ total: 0, items: [] }))
+        fetchAuditLogs(undefined, 10, 0).catch(() => ({ total: 0, items: [] })),
+        fetchPendingApprovals().catch(() => [])
       ]);
 
       if (h) setHealth(h);
       if (r) setReadiness(r);
-      if (s) setSystemSettings(s);
+      if (s) {
+        setSystemSettings(s);
+        if (!scanFolderInput && s.approved_roots.length > 0) {
+          setScanFolderInput(s.approved_roots[0].path);
+        }
+      }
       if (m) setModelsData(m);
       if (a) {
         setAuditLogs(a.items);
         setTotalAuditLogs(a.total);
       }
+      if (p) setPendingPlans(p);
     } catch (err: any) {
       setError(err.message || 'Error communicating with backend service.');
     } finally {
@@ -96,14 +122,70 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleModelChange = async (newModel: string) => {
+  const handleScan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!scanFolderInput.trim()) {
+      setActionNotice('Please select or enter an approved folder path to scan.');
+      return;
+    }
     try {
-      setSettingActionMsg('Updating model...');
-      await selectModel(newModel);
-      setSettingActionMsg(`Active model switched to ${newModel}`);
+      setIsScanning(true);
+      setActionNotice('Scanning files and computing SHA-256 hashes...');
+      const res = await scanFolder(scanFolderInput.trim(), useAiClassification);
+      setLatestScanResult(res);
+      setActionNotice(
+        `Scan complete: ${res.total_files} files analyzed, ${res.duplicates_found} duplicates found.`
+      );
       await loadData();
     } catch (err: any) {
-      setSettingActionMsg(`Error: ${err.message}`);
+      setActionNotice(`Scan failed: ${err.message}`);
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleApprovePlan = async (planId: string) => {
+    try {
+      setActionNotice('Revalidating preconditions and executing safe file operations...');
+      const updated = await approvePlan(planId);
+      setActionNotice(`Plan '${updated.title}' executed successfully. ${updated.items.length} files moved.`);
+      setCompletedPlans((prev) => [updated, ...prev.filter((p) => p.id !== updated.id)]);
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Approval execution failed: ${err.message}`);
+    }
+  };
+
+  const handleRejectPlan = async (planId: string) => {
+    try {
+      await rejectPlan(planId);
+      setActionNotice('Plan rejected. Zero filesystem changes were made.');
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Rejection failed: ${err.message}`);
+    }
+  };
+
+  const handleUndoPlan = async (planId: string) => {
+    try {
+      setActionNotice('Reversing operations and restoring files to original paths...');
+      const restored = await undoPlan(planId);
+      setActionNotice(`Rollback complete. Files restored safely for plan '${restored.title}'.`);
+      setCompletedPlans((prev) => prev.filter((p) => p.id !== planId));
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Undo failed: ${err.message}`);
+    }
+  };
+
+  const handleModelChange = async (newModel: string) => {
+    try {
+      setActionNotice('Updating model...');
+      await selectModel(newModel);
+      setActionNotice(`Active model switched to ${newModel}`);
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Error: ${err.message}`);
     }
   };
 
@@ -111,25 +193,25 @@ export default function App() {
     e.preventDefault();
     if (!newRootPath.trim()) return;
     try {
-      setSettingActionMsg('Adding approved root...');
+      setActionNotice('Adding approved root...');
       await addApprovedRoot(newRootPath.trim(), newRootLabel.trim());
       setNewRootPath('');
       setNewRootLabel('');
-      setSettingActionMsg('Folder root approved successfully.');
+      setActionNotice('Folder root approved successfully.');
       await loadData();
     } catch (err: any) {
-      setSettingActionMsg(`Error: ${err.message}`);
+      setActionNotice(`Error: ${err.message}`);
     }
   };
 
   const handleRemoveRoot = async (rootId: string) => {
     try {
-      setSettingActionMsg('Deactivating root...');
+      setActionNotice('Deactivating root...');
       await removeApprovedRoot(rootId);
-      setSettingActionMsg('Folder root deactivated.');
+      setActionNotice('Folder root deactivated.');
       await loadData();
     } catch (err: any) {
-      setSettingActionMsg(`Error: ${err.message}`);
+      setActionNotice(`Error: ${err.message}`);
     }
   };
 
@@ -143,7 +225,7 @@ export default function App() {
     { id: 'inbox', label: 'Inbox & Notes', icon: Inbox },
     { id: 'tradesloth', label: 'TradeSloth Auditor', icon: Scale },
     { id: 'copilot', label: 'Local Copilot', icon: Bot },
-    { id: 'approvals', label: 'Approvals', icon: CheckCircle2, badge: 0 },
+    { id: 'approvals', label: 'Approvals', icon: CheckCircle2, badge: pendingPlans.length },
     { id: 'tasks', label: 'Task History', icon: ListTodo },
     { id: 'settings', label: 'Settings & Audit', icon: SettingsIcon },
   ];
@@ -253,6 +335,15 @@ export default function App() {
 
         {/* Dynamic Tab Body */}
         <div className="flex-1 overflow-y-auto p-6">
+          {actionNotice && (
+            <div className="max-w-5xl mx-auto mb-4 p-3 rounded-lg bg-slate-800 border border-slate-700 text-xs text-emerald-400 flex items-center justify-between shadow-lg">
+              <span>{actionNotice}</span>
+              <button onClick={() => setActionNotice(null)} className="text-slate-400 hover:text-white">
+                <Check className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {activeTab === 'overview' && (
             <div className="space-y-6 max-w-6xl mx-auto">
               {/* Hero Status Banner */}
@@ -310,7 +401,7 @@ export default function App() {
                     <span>Pending Approvals</span>
                     <CheckCircle2 className="w-4 h-4 text-amber-400" />
                   </div>
-                  <div className="text-base font-bold text-white">0 Actions</div>
+                  <div className="text-base font-bold text-white">{pendingPlans.length} Actions</div>
                   <p className="text-[11px] text-slate-500 mt-1">
                     All file changes require user consent
                   </p>
@@ -444,17 +535,231 @@ export default function App() {
             </div>
           )}
 
-          {activeTab === 'settings' && (
+          {activeTab === 'organizer' && (
             <div className="space-y-6 max-w-5xl mx-auto">
-              {settingActionMsg && (
-                <div className="p-3 rounded-lg bg-slate-800 border border-slate-700 text-xs text-emerald-400 flex items-center justify-between">
-                  <span>{settingActionMsg}</span>
-                  <button onClick={() => setSettingActionMsg(null)} className="text-slate-400 hover:text-white">
-                    <Check className="w-3.5 h-3.5" />
-                  </button>
+              {/* Scan Configuration Card */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <FolderTree className="w-4 h-4 text-emerald-400" />
+                    Smart Folder Scan & Organization
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Select an approved root directory to index file metadata, detect exact SHA-256 duplicates, and generate proposed move plans.
+                  </p>
+                </div>
+
+                <form onSubmit={handleScan} className="space-y-3 pt-2">
+                  <div className="flex gap-2">
+                    <select
+                      value={scanFolderInput}
+                      onChange={(e) => setScanFolderInput(e.target.value)}
+                      className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value="">-- Select an approved root --</option>
+                      {systemSettings?.approved_roots.map((r) => (
+                        <option key={r.id} value={r.path}>
+                          {r.label} ({r.path})
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="submit"
+                      disabled={isScanning || !scanFolderInput}
+                      className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-2 transition disabled:opacity-50"
+                    >
+                      {isScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                      <span>{isScanning ? 'Analyzing...' : 'Scan & Plan'}</span>
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <input
+                      type="checkbox"
+                      id="ai-classify"
+                      checked={useAiClassification}
+                      onChange={(e) => setUseAiClassification(e.target.checked)}
+                      className="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-0"
+                    />
+                    <label htmlFor="ai-classify" className="cursor-pointer select-none">
+                      Enable local open-weight AI classification ({systemSettings?.ollama_selected_model || 'Ollama'})
+                    </label>
+                  </div>
+                </form>
+              </div>
+
+              {/* Latest Scan Results / Plan Preview */}
+              {latestScanResult && latestScanResult.plan && (
+                <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div>
+                      <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                        <FileCheck className="w-4 h-4 text-emerald-400" />
+                        Proposed Action Plan: {latestScanResult.plan.title}
+                      </h4>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {latestScanResult.actions_planned} files ready to organize. Review the destination paths and reasons before approving.
+                      </p>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleRejectPlan(latestScanResult.plan!.id)}
+                        className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 text-xs font-medium flex items-center gap-1.5 transition"
+                      >
+                        <X className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Reject</span>
+                      </button>
+                      <button
+                        onClick={() => handleApprovePlan(latestScanResult.plan!.id)}
+                        className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-lg shadow-emerald-500/20"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Approve & Execute</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Plan Items List */}
+                  <div className="space-y-2">
+                    {latestScanResult.plan.items.map((item) => (
+                      <div key={item.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs">
+                        <div className="space-y-1 max-w-2xl">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-white truncate max-w-sm" title={item.source_path}>
+                              {item.source_path.split('\\').pop() || item.source_path.split('/').pop()}
+                            </span>
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-600" />
+                            <span className="font-mono text-[11px] text-emerald-400 truncate max-w-sm" title={item.target_path}>
+                              {item.target_path.split('\\').slice(-2).join('/')}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Reason: {item.reason}
+                          </p>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                          {item.action_type.toUpperCase()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
+              {/* Action History & Safe Undo */}
+              {completedPlans.length > 0 && (
+                <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <RotateCcw className="w-4 h-4 text-purple-400" />
+                    Executed Plans & Safe Undo
+                  </h4>
+                  <div className="space-y-2">
+                    {completedPlans.map((plan) => (
+                      <div key={plan.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs">
+                        <div>
+                          <div className="font-semibold text-white">{plan.title}</div>
+                          <div className="text-[11px] text-slate-400">
+                            Executed {plan.items.length} moves • {plan.executed_at?.slice(0, 19).replace('T', ' ')} UTC
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleUndoPlan(plan.id)}
+                          className="px-3 py-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 text-xs font-medium flex items-center gap-1.5 transition"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Undo & Restore</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'approvals' && (
+            <div className="space-y-6 max-w-5xl mx-auto">
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-amber-400" />
+                      Pending Action Approvals ({pendingPlans.length})
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      No automated action executes without explicit user consent. Inspect proposed file changes and risk levels.
+                    </p>
+                  </div>
+                </div>
+
+                {pendingPlans.length === 0 ? (
+                  <div className="p-8 text-center text-slate-500 text-xs">
+                    No pending approval requests. Scan a folder in the File Organizer to create one.
+                  </div>
+                ) : (
+                  <div className="space-y-4 pt-2">
+                    {pendingPlans.map((plan) => (
+                      <div key={plan.id} className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 space-y-3">
+                        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                          <div>
+                            <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                              {plan.module}
+                            </span>
+                            <h4 className="text-sm font-bold text-white mt-1">{plan.title}</h4>
+                            <p className="text-xs text-slate-400">{plan.description}</p>
+                          </div>
+
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleRejectPlan(plan.id)}
+                              className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 text-xs font-medium flex items-center gap-1.5 transition"
+                            >
+                              <X className="w-3.5 h-3.5 text-rose-400" />
+                              <span>Reject</span>
+                            </button>
+                            <button
+                              onClick={() => handleApprovePlan(plan.id)}
+                              className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-lg shadow-emerald-500/20"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Approve</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {plan.items.map((item) => (
+                            <div key={item.id} className="p-2.5 rounded bg-slate-900 border border-slate-800/80 flex items-center justify-between text-xs">
+                              <div className="space-y-0.5 max-w-xl">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-semibold text-slate-200 truncate max-w-xs" title={item.source_path}>
+                                    {item.source_path.split('\\').pop() || item.source_path.split('/').pop()}
+                                  </span>
+                                  <ChevronRight className="w-3.5 h-3.5 text-slate-600" />
+                                  <span className="font-mono text-[11px] text-emerald-400 truncate max-w-xs" title={item.target_path}>
+                                    {item.target_path.split('\\').slice(-2).join('/')}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-400">{item.reason}</div>
+                              </div>
+                              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300">
+                                {item.risk_level.toUpperCase()} RISK
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <div className="space-y-6 max-w-5xl mx-auto">
               {/* Local Ollama Model Configuration */}
               <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
                 <div className="flex items-center justify-between">
@@ -638,7 +943,7 @@ export default function App() {
             </div>
           )}
 
-          {activeTab !== 'overview' && activeTab !== 'settings' && (
+          {activeTab !== 'overview' && activeTab !== 'settings' && activeTab !== 'organizer' && activeTab !== 'approvals' && (
             <div className="max-w-6xl mx-auto rounded-xl border border-slate-800 bg-[#111726]/40 p-8 text-center text-slate-400">
               <div className="w-12 h-12 mx-auto rounded-xl bg-slate-800 flex items-center justify-center text-slate-300 mb-3">
                 <Sparkles className="w-6 h-6 text-emerald-400" />
@@ -651,7 +956,7 @@ export default function App() {
               </p>
               <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono text-slate-400">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                API Route: /api/{activeTab === 'organizer' ? 'organizer' : activeTab}
+                API Route: /api/{activeTab}
               </div>
             </div>
           )}

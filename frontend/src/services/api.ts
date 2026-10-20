@@ -52,26 +52,17 @@ export interface ModelsResponse {
   error?: string;
 }
 
-export interface TaskRecord {
-  id: string;
-  task_type: string;
-  status: 'queued' | 'running' | 'awaiting_approval' | 'succeeded' | 'failed' | 'cancelled';
-  progress: number;
-  message: string;
-  created_at: string;
-  completed_at: string | null;
-  error_message: string | null;
-  metadata?: Record<string, any>;
-}
-
 export interface ActionItem {
   id: string;
-  action_type: 'move' | 'rename' | 'tag' | 'delete_duplicate';
+  plan_id: string;
+  action_type: 'move' | 'rename' | 'tag' | 'duplicate_resolve';
   source_path: string;
   target_path: string;
+  source_hash: string;
   risk_level: 'low' | 'medium' | 'high';
   reason: string;
   status: 'pending' | 'executed' | 'rejected' | 'undone';
+  executed_at?: string | null;
 }
 
 export interface ActionPlan {
@@ -79,9 +70,20 @@ export interface ActionPlan {
   title: string;
   description: string;
   module: string;
-  items: ActionItem[];
+  status: 'pending' | 'approved' | 'rejected' | 'completed' | 'undone';
   created_at: string;
-  status: 'pending' | 'approved' | 'rejected' | 'completed';
+  approved_at?: string | null;
+  executed_at?: string | null;
+  items: ActionItem[];
+}
+
+export interface ScanResult {
+  folder: string;
+  total_files: number;
+  duplicates_found: number;
+  actions_planned: number;
+  plan: ActionPlan | null;
+  message?: string;
 }
 
 export interface AuditLogEntry {
@@ -177,5 +179,57 @@ export async function fetchAuditLogs(
 
   const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`Fetch audit logs failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function scanFolder(folder_path: string, use_ai: boolean = true): Promise<ScanResult> {
+  const res = await fetch(`${API_BASE}/organizer/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder_path, use_ai })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Scan failed.');
+  }
+  return res.json();
+}
+
+export async function fetchPendingApprovals(): Promise<ActionPlan[]> {
+  const res = await fetch(`${API_BASE}/approvals/pending`);
+  if (!res.ok) throw new Error(`Fetch pending approvals failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function approvePlan(planId: string): Promise<ActionPlan> {
+  const res = await fetch(`${API_BASE}/approvals/${planId}/approve`, {
+    method: 'POST'
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Approval failed.');
+  }
+  return res.json();
+}
+
+export async function rejectPlan(planId: string): Promise<ActionPlan> {
+  const res = await fetch(`${API_BASE}/approvals/${planId}/reject`, {
+    method: 'POST'
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Rejection failed.');
+  }
+  return res.json();
+}
+
+export async function undoPlan(planId: string): Promise<ActionPlan> {
+  const res = await fetch(`${API_BASE}/approvals/${planId}/undo`, {
+    method: 'POST'
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Undo failed.');
+  }
   return res.json();
 }

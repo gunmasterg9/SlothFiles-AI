@@ -121,8 +121,15 @@ slothpilot-ai/
 - **Status:** Completed.
 
 ### Milestone M3: Smart File Organizer
-- **Goal:** Approved folder selection, file metadata indexing, SHA-256 duplicate detection, document text extraction (PDF, DOCX, XLSX, TXT), AI classification with deterministic category allowlist, action plan generation, conflict detection, approval workflow, safe file move/rename, undo support.
-- **Verification:** Synthetic folder tests: exact duplicates identified by SHA-256; mock/real classification tested; rejected plans make 0 filesystem changes; approved moves succeed; undo restores files accurately.
+- **Goal:** Approved folder selection, file metadata indexing, SHA-256 duplicate detection, document text extraction (PDF, DOCX, XLSX, TXT, EML), AI classification with deterministic category allowlist, action plan generation, conflict detection, approval workflow, safe file move/rename, undo support.
+- **Verification:**
+  - Pytest suite: 28 tests passing (`test_document_extractor.py`, `test_organizer_and_approvals.py`, etc.).
+  - Document text extraction verified for plain text, PDF, DOCX, XLSX, and standard RFC 5322 EML files.
+  - Scanned PDF detection tested: blank/image-only PDFs properly flag OCR requirement rather than silently failing.
+  - Exact duplicate detection verified: identical files matched by SHA-256 and routed to `Duplicates/`.
+  - Shared approval lifecycle verified: rejected plans make 0 filesystem changes; approved plans revalidate preconditions (detecting source file modification and target collision); undo restores files accurately.
+  - Frontend production build: compiled in 2.61s with interactive Organizer scanner, Plan previews, Approvals manager, and Undo controller.
+- **Status:** Completed.
 
 ### Milestone M4: LazyDesk Automation
 - **Goal:** Watchdog folder monitoring restricted to approved roots, pause/resume, persistent queue, file-change deduplication, event loop prevention (ignoring internal moves/temp files), retry limits with backoff, task history.

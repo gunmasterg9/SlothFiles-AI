@@ -8,7 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.config import settings
 from backend.app.db.migrations import run_migrations
-from backend.app.routers import health, settings as settings_router, audit
+from backend.app.routers import health, settings as settings_router, audit, organizer, approvals
 
 # Setup logging
 logging.basicConfig(
@@ -118,3 +118,5 @@ async def generic_exception_handler(request: Request, exc: Exception):
 app.include_router(health.router)
 app.include_router(settings_router.router)
 app.include_router(audit.router)
+app.include_router(organizer.router)
+app.include_router(approvals.router)
