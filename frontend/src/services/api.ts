@@ -86,6 +86,86 @@ export interface ScanResult {
   message?: string;
 }
 
+export interface OrganizationRule {
+  id: string;
+  name: string;
+  description: string;
+  is_enabled: boolean;
+  priority: number;
+  match_extensions: string;
+  match_glob: string;
+  match_regex: string;
+  destination_template: string;
+  action_type: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RuleCreate {
+  name: string;
+  description?: string;
+  is_enabled?: boolean;
+  priority?: number;
+  match_extensions?: string;
+  match_glob?: string;
+  match_regex?: string;
+  destination_template: string;
+  action_type?: string;
+}
+
+export interface RuleUpdate {
+  name?: string;
+  description?: string;
+  is_enabled?: boolean;
+  priority?: number;
+  match_extensions?: string;
+  match_glob?: string;
+  match_regex?: string;
+  destination_template?: string;
+  action_type?: string;
+}
+
+export interface RuleTestRequest {
+  sample_filename: string;
+  sample_category?: string;
+  rule_id?: string;
+  rule_data?: RuleCreate;
+}
+
+export interface RuleTestResponse {
+  matched: boolean;
+  rule_id?: string | null;
+  rule_name?: string | null;
+  priority?: number | null;
+  reason: string;
+  resolved_destination?: string | null;
+  template_error?: string | null;
+}
+
+export interface TemplateVariableInfo {
+  variable: string;
+  description: string;
+  example: string;
+  date_source?: string;
+}
+
+export interface TemplatesResponse {
+  variables: TemplateVariableInfo[];
+  example_templates: string[];
+}
+
+export interface TemplatePreviewRequest {
+  template: string;
+  sample_filename?: string;
+  category?: string;
+}
+
+export interface TemplatePreviewResponse {
+  template: string;
+  sample_filename: string;
+  resolved_destination: string;
+}
+
 export interface FolderWatch {
   id: string;
   folder_path: string;
@@ -94,6 +174,28 @@ export interface FolderWatch {
   debounce_seconds: number;
   last_scan_at: string | null;
   created_at: string;
+}
+
+export interface WatcherEvent {
+  id: string;
+  watch_id: string;
+  folder_path: string;
+  event_type: 'created' | 'modified' | 'moved' | 'deleted';
+  path: string;
+  relative_path: string;
+  previous_path?: string | null;
+  previous_relative_path?: string | null;
+  is_directory: boolean;
+  timestamp: string;
+  size_bytes?: number | null;
+  suggestion?: any | null;
+}
+
+export interface WatcherEventsResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  events: WatcherEvent[];
 }
 
 export interface TaskRecord {
@@ -285,6 +387,88 @@ export async function scanFolder(folder_path: string, use_ai: boolean = true): P
   return res.json();
 }
 
+export async function fetchOrganizationRules(onlyEnabled: boolean = false): Promise<OrganizationRule[]> {
+  const url = new URL(`${window.location.origin}${API_BASE}/organizer/rules`);
+  if (onlyEnabled) url.searchParams.set('only_enabled', 'true');
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`Fetch organization rules failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function createOrganizationRule(rule: RuleCreate): Promise<OrganizationRule> {
+  const res = await fetch(`${API_BASE}/organizer/rules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rule)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail || 'Failed to create organization rule');
+  }
+  return res.json();
+}
+
+export async function updateOrganizationRule(ruleId: string, rule: RuleUpdate): Promise<OrganizationRule> {
+  const res = await fetch(`${API_BASE}/organizer/rules/${ruleId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rule)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail || 'Failed to update organization rule');
+  }
+  return res.json();
+}
+
+export async function deleteOrganizationRule(ruleId: string): Promise<any> {
+  const res = await fetch(`${API_BASE}/organizer/rules/${ruleId}`, {
+    method: 'DELETE'
+  });
+  if (!res.ok) throw new Error(`Delete rule failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function toggleOrganizationRule(ruleId: string): Promise<OrganizationRule> {
+  const res = await fetch(`${API_BASE}/organizer/rules/${ruleId}/toggle`, {
+    method: 'POST'
+  });
+  if (!res.ok) throw new Error(`Toggle rule failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function testOrganizationRule(req: RuleTestRequest): Promise<RuleTestResponse> {
+  const res = await fetch(`${API_BASE}/organizer/rules/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail || 'Failed to test rule');
+  }
+  return res.json();
+}
+
+export async function fetchTemplateVariables(): Promise<TemplatesResponse> {
+  const res = await fetch(`${API_BASE}/organizer/templates`);
+  if (!res.ok) throw new Error(`Fetch templates failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function previewTemplate(req: TemplatePreviewRequest): Promise<TemplatePreviewResponse> {
+  const res = await fetch(`${API_BASE}/organizer/templates/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req)
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail || 'Failed to preview template');
+  }
+  return res.json();
+}
+
 export async function fetchPendingApprovals(): Promise<ActionPlan[]> {
   const res = await fetch(`${API_BASE}/approvals/pending`);
   if (!res.ok) throw new Error(`Fetch pending approvals failed: HTTP ${res.status}`);
@@ -358,6 +542,29 @@ export async function resumeWatch(watchId: string): Promise<any> {
 export async function removeWatch(watchId: string): Promise<any> {
   const res = await fetch(`${API_BASE}/watcher/watches/${watchId}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`Remove watch failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchWatcherEvents(
+  watchId?: string,
+  eventType?: string,
+  limit: number = 50,
+  offset: number = 0
+): Promise<WatcherEventsResponse> {
+  const url = new URL(`${window.location.origin}${API_BASE}/watcher/events`);
+  if (watchId) url.searchParams.set('watch_id', watchId);
+  if (eventType) url.searchParams.set('event_type', eventType);
+  url.searchParams.set('limit', limit.toString());
+  url.searchParams.set('offset', offset.toString());
+
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`Fetch watcher events failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function clearWatcherEvents(): Promise<any> {
+  const res = await fetch(`${API_BASE}/watcher/events/clear`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Clear watcher events failed: HTTP ${res.status}`);
   return res.json();
 }
 

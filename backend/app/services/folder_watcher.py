@@ -1,15 +1,16 @@
 import asyncio
+from collections import deque
 from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
 import threading
 import time
+from typing import Dict, Any, List, Optional, Tuple
 import uuid
-from typing import Dict, Any
 
 from fastapi import HTTPException, status
-from watchdog.events import FileSystemEventHandler, FileSystemEvent
+from watchdog.events import FileSystemEventHandler, FileSystemEvent, FileSystemMovedEvent
 from watchdog.observers import Observer
 
 from backend.app.db.session import get_db
@@ -17,79 +18,257 @@ from backend.app.services.audit_service import audit_service
 from backend.app.services.path_service import path_service
 from backend.app.services.task_queue import task_queue
 from backend.app.services.file_organizer import ALLOWLISTED_CATEGORIES, file_organizer_service
+from backend.app.services.rules_engine import rules_engine_service
 
 logger = logging.getLogger("slothpilot.lazydesk")
 
 
 class LazyDeskFileHandler(FileSystemEventHandler):
-    """Event handler with debouncing and strict event-loop prevention."""
+    """Event handler capturing file creation, modification, rename/move, and deletion
+    with debouncing, duplicate event suppression, and strict event-loop prevention."""
 
     def __init__(self, watch_id: str, folder_path: Path, debounce_seconds: float = 2.0):
         super().__init__()
         self.watch_id = watch_id
         self.folder_path = folder_path.resolve()
         self.debounce_seconds = debounce_seconds
-        self._pending_events: Dict[str, float] = {}
+        # Maps abs_path_str -> (process_time: float, origin_type: str, previous_path: Optional[str])
+        self._pending_events: Dict[str, Tuple[float, str, Optional[str]]] = {}
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._worker_thread = threading.Thread(target=self._debounce_worker, daemon=True)
         self._worker_thread.start()
 
-    def should_ignore(self, file_path: Path) -> bool:
+    def should_ignore(self, file_path: Path | str) -> bool:
         """Filter out temp files, internal category directories, and hidden artifacts."""
-        name = file_path.name
-        if name.startswith(".") or name.startswith("~$") or name.endswith(".tmp") or name == "Thumbs.db":
+        try:
+            p = Path(file_path)
+            name = p.name
+        except Exception:
+            return True
+
+        if not name:
+            return True
+
+        # Hidden, office lock files, temp files, and system artifacts
+        if (
+            name.startswith(".")
+            or name.startswith("~$")
+            or name.endswith(".tmp")
+            or name.endswith(".crdownload")
+            or name.endswith(".swp")
+            or name.endswith(".swo")
+            or name == "Thumbs.db"
+            or name.lower() == "desktop.ini"
+        ):
             return True
 
         # Loop prevention: Ignore anything inside category subdirectories created by the application
         try:
-            rel = file_path.resolve().relative_to(self.folder_path)
+            rel = p.resolve().relative_to(self.folder_path)
             parts = rel.parts
             if len(parts) > 1 and parts[0] in ALLOWLISTED_CATEGORIES:
                 return True
-        except ValueError:
-            return True
+        except (ValueError, RuntimeError):
+            # Outside of watched folder
+            return False
 
         return False
 
-    def on_created(self, event: FileSystemEvent):
-        if not event.is_directory:
-            self._record_event(Path(event.src_path))
+    def _safe_paths(self, raw_path: str | Path) -> Tuple[str, str]:
+        """Safely normalize and compute absolute and relative paths without throwing exceptions."""
+        try:
+            p = Path(raw_path)
+            resolved = p.resolve(strict=False)
+            abs_str = str(resolved)
+        except Exception:
+            abs_str = str(raw_path)
 
-    def on_modified(self, event: FileSystemEvent):
-        if not event.is_directory:
-            self._record_event(Path(event.src_path))
+        try:
+            rel_str = str(Path(abs_str).relative_to(self.folder_path))
+        except (ValueError, RuntimeError):
+            rel_str = Path(raw_path).name
 
-    def _record_event(self, path: Path):
-        if self.should_ignore(path):
-            return
+        return abs_str, rel_str
 
-        with self._lock:
-            # Check if this watch is currently paused
+    def _is_paused(self) -> bool:
+        """Check database whether this watch is currently paused."""
+        try:
             with get_db() as conn:
                 row = conn.execute(
                     "SELECT is_paused FROM folder_watches WHERE id = ?",
                     (self.watch_id,)
                 ).fetchone()
-                if row and row["is_paused"]:
-                    return
+                return bool(row and row["is_paused"])
+        except Exception:
+            return False
 
-            self._pending_events[str(path.resolve())] = time.time() + self.debounce_seconds
+    def on_created(self, event: FileSystemEvent):
+        if self.should_ignore(event.src_path):
+            return
+        if self._is_paused():
+            return
+
+        is_dir = event.is_directory
+        abs_path, rel_path = self._safe_paths(event.src_path)
+
+        # Record immediate created event to recent feed
+        size_bytes = None
+        if not is_dir and Path(abs_path).exists():
+            try:
+                size_bytes = Path(abs_path).stat().st_size
+            except Exception:
+                size_bytes = None
+
+        folder_watcher_service.record_event({
+            "id": str(uuid.uuid4()),
+            "watch_id": self.watch_id,
+            "folder_path": str(self.folder_path),
+            "event_type": "created",
+            "path": abs_path,
+            "relative_path": rel_path,
+            "previous_path": None,
+            "previous_relative_path": None,
+            "is_directory": is_dir,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "size_bytes": size_bytes,
+            "suggestion": None
+        })
+
+        if not is_dir:
+            # Enqueue for debounced settled processing & classification suggestion
+            with self._lock:
+                self._pending_events[abs_path] = (time.time() + self.debounce_seconds, "created", None)
+
+    def on_modified(self, event: FileSystemEvent):
+        if event.is_directory:
+            # Directory modification events on Windows are high frequency folder timestamp touches; ignore
+            return
+        if self.should_ignore(event.src_path):
+            return
+        if self._is_paused():
+            return
+
+        abs_path, _ = self._safe_paths(event.src_path)
+
+        # Debounce modification bursts: update process time deadline
+        with self._lock:
+            self._pending_events[abs_path] = (time.time() + self.debounce_seconds, "modified", None)
+
+    def on_moved(self, event: FileSystemMovedEvent):
+        src_ignored = self.should_ignore(event.src_path)
+        dest_ignored = self.should_ignore(event.dest_path)
+        if src_ignored and dest_ignored:
+            return
+        if self._is_paused():
+            return
+
+        is_dir = event.is_directory
+        src_abs, src_rel = self._safe_paths(event.src_path)
+        dest_abs, dest_rel = self._safe_paths(event.dest_path)
+
+        # Cancel any pending debounced events for old path
+        with self._lock:
+            self._pending_events.pop(src_abs, None)
+
+        size_bytes = None
+        if not is_dir and Path(dest_abs).exists():
+            try:
+                size_bytes = Path(dest_abs).stat().st_size
+            except Exception:
+                size_bytes = None
+
+        # Record moved event preserving exact source and destination paths
+        folder_watcher_service.record_event({
+            "id": str(uuid.uuid4()),
+            "watch_id": self.watch_id,
+            "folder_path": str(self.folder_path),
+            "event_type": "moved",
+            "path": dest_abs,
+            "relative_path": dest_rel,
+            "previous_path": src_abs,
+            "previous_relative_path": src_rel,
+            "is_directory": is_dir,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "size_bytes": size_bytes,
+            "suggestion": None
+        })
+
+        # If file moved within watch and not ignored, schedule classification
+        if not is_dir and not dest_ignored and Path(dest_abs).exists():
+            with self._lock:
+                self._pending_events[dest_abs] = (time.time() + self.debounce_seconds, "moved", src_abs)
+
+    def on_deleted(self, event: FileSystemEvent):
+        if self.should_ignore(event.src_path):
+            return
+        if self._is_paused():
+            return
+
+        is_dir = event.is_directory
+        src_abs, src_rel = self._safe_paths(event.src_path)
+
+        # Cancel any pending debounced events since the file is deleted
+        with self._lock:
+            self._pending_events.pop(src_abs, None)
+
+        # Record deletion event safely. Do not open, stat, or hash non-existent file.
+        folder_watcher_service.record_event({
+            "id": str(uuid.uuid4()),
+            "watch_id": self.watch_id,
+            "folder_path": str(self.folder_path),
+            "event_type": "deleted",
+            "path": src_abs,
+            "relative_path": src_rel,
+            "previous_path": None,
+            "previous_relative_path": None,
+            "is_directory": is_dir,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "size_bytes": None,
+            "suggestion": None
+        })
 
     def _debounce_worker(self):
         while not self._stop_event.is_set():
-            time.sleep(0.5)
+            time.sleep(0.3)
             now = time.time()
-            to_process = []
+            to_process: List[Tuple[str, str, Optional[str]]] = []
 
             with self._lock:
-                for path_str, process_time in list(self._pending_events.items()):
-                    if now >= process_time:
-                        to_process.append(path_str)
+                for path_str, (proc_time, origin_type, prev_path) in list(self._pending_events.items()):
+                    if now >= proc_time:
+                        to_process.append((path_str, origin_type, prev_path))
                         del self._pending_events[path_str]
 
-            for path_str in to_process:
-                self._process_settled_file(Path(path_str))
+            for path_str, origin_type, prev_path in to_process:
+                f_path = Path(path_str)
+                if not f_path.exists() or self.should_ignore(f_path):
+                    continue
+
+                # If this was a debounced modification burst, emit the settled modified event
+                if origin_type == "modified":
+                    abs_path, rel_path = self._safe_paths(f_path)
+                    try:
+                        sz = f_path.stat().st_size
+                    except Exception:
+                        sz = None
+
+                    folder_watcher_service.record_event({
+                        "id": str(uuid.uuid4()),
+                        "watch_id": self.watch_id,
+                        "folder_path": str(self.folder_path),
+                        "event_type": "modified",
+                        "path": abs_path,
+                        "relative_path": rel_path,
+                        "previous_path": None,
+                        "previous_relative_path": None,
+                        "is_directory": False,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "size_bytes": sz,
+                        "suggestion": None
+                    })
+
+                self._process_settled_file(f_path)
 
     def _process_settled_file(self, file_path: Path):
         """Process a settled file: wait for file lock release, create task and prepare suggested plan."""
@@ -121,11 +300,23 @@ class LazyDeskFileHandler(FileSystemEventHandler):
         try:
             task_queue.transition(task["id"], "running", progress=0.2, message="Analyzing file...")
 
-            # Run deterministic or AI classification to prepare suggestion
-            classification = file_organizer_service._deterministic_classification(
-                file_name=file_path.name,
-                text=""
-            )
+            # Run user organization rules or fallback to categorization
+            rule_proposal = rules_engine_service.evaluate_file(file_path, self.folder_path)
+            if rule_proposal:
+                classification = {
+                    "category": rule_proposal["rule_name"],
+                    "suggested_filename": Path(rule_proposal["target_path"]).name,
+                    "target_path": rule_proposal["target_path"],
+                    "reason": rule_proposal["reason"],
+                    "rule_id": rule_proposal["rule_id"],
+                    "rule_name": rule_proposal["rule_name"],
+                    "is_ai": False
+                }
+            else:
+                classification = file_organizer_service._deterministic_classification(
+                    file_name=file_path.name,
+                    text=""
+                )
 
             task_queue.transition(
                 task["id"],
@@ -133,6 +324,13 @@ class LazyDeskFileHandler(FileSystemEventHandler):
                 progress=1.0,
                 message=f"Prepared suggestion: Category '{classification['category']}'",
                 extra_metadata={"suggestion": classification}
+            )
+
+            # Attach suggestion to recent matching event in the in-memory feed
+            folder_watcher_service.attach_suggestion(
+                watch_id=self.watch_id,
+                file_path=str(file_path.resolve()),
+                suggestion=classification
             )
 
             audit_service.log(
@@ -155,10 +353,84 @@ class LazyDeskFileHandler(FileSystemEventHandler):
 
 
 class FolderWatcherService:
-    """Manages active folder watch observers on approved directory roots."""
+    """Manages active folder watch observers on approved directory roots
+    and maintains a bounded in-memory activity event stream."""
 
     def __init__(self):
         self._observers: Dict[str, tuple[Observer, LazyDeskFileHandler]] = {}
+        # Bounded in-memory event feed (retained up to 1000 items)
+        self._recent_events: deque = deque(maxlen=1000)
+        self._events_lock = threading.Lock()
+
+    def record_event(self, event_data: dict) -> dict:
+        """Record a normalized file activity event with duplicate suppression."""
+        with self._events_lock:
+            if self._recent_events:
+                last = self._recent_events[-1]
+                # Check for rapid duplicate events within 0.5 seconds
+                if (
+                    last["watch_id"] == event_data["watch_id"]
+                    and last["event_type"] == event_data["event_type"]
+                    and last["path"] == event_data["path"]
+                    and last["is_directory"] == event_data["is_directory"]
+                ):
+                    try:
+                        last_dt = datetime.fromisoformat(last["timestamp"])
+                        curr_dt = datetime.fromisoformat(event_data["timestamp"])
+                        if (curr_dt - last_dt).total_seconds() < 0.5:
+                            # Suppress rapid duplicate event
+                            return last
+                    except Exception:
+                        pass
+
+            self._recent_events.append(event_data)
+            return event_data
+
+    def attach_suggestion(self, watch_id: str, file_path: str, suggestion: dict):
+        """Attach classification suggestion to recent events matching this file."""
+        with self._events_lock:
+            for ev in reversed(self._recent_events):
+                if ev["watch_id"] == watch_id and ev["path"] == file_path:
+                    ev["suggestion"] = suggestion
+                    break
+
+    def get_recent_events(
+        self,
+        watch_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> dict:
+        """Retrieve paginated recent file events in reverse chronological order.
+
+        NOTE: This event feed is maintained in an in-memory buffer (bounded to 1,000 events)
+        to deliver instant loopback responsiveness without disk I/O overhead.
+        Consequential operations (approvals, moves, rollbacks) are stored permanently in SQLite audit_logs.
+        """
+        with self._events_lock:
+            # Copy items in reverse chronological order
+            filtered = list(reversed(self._recent_events))
+
+            if watch_id:
+                filtered = [e for e in filtered if e["watch_id"] == watch_id]
+            if event_type:
+                target_type = event_type.strip().lower()
+                filtered = [e for e in filtered if e["event_type"] == target_type]
+
+            total = len(filtered)
+            paged = filtered[offset : offset + limit]
+
+            return {
+                "total": total,
+                "events": paged,
+                "limit": limit,
+                "offset": offset
+            }
+
+    def clear_events(self):
+        """Clear all in-memory events (useful for test isolation and dashboard resets)."""
+        with self._events_lock:
+            self._recent_events.clear()
 
     def list_watches(self) -> list[dict]:
         with get_db() as conn:
@@ -277,6 +549,7 @@ class FolderWatcherService:
             old_handler.stop()
             try:
                 old_obs.stop()
+                old_obs.join(timeout=2.0)
             except Exception:
                 pass
 

@@ -27,12 +27,25 @@ try {
 }
 
 function Stop-SpecificProcess {
-    param ([int]$pidToStop, [string]$name)
+    param ([int]$pidToStop, [string]$name, [string[]]$expectedNames)
     if ($pidToStop -gt 0) {
         $proc = Get-Process -Id $pidToStop -ErrorAction SilentlyContinue
         if ($proc) {
+            $pname = $proc.ProcessName.ToLower()
+            $matched = $false
+            foreach ($exp in $expectedNames) {
+                if ($pname -like "*$($exp.ToLower())*") { $matched = $true; break }
+            }
+            if (-not $matched) {
+                Write-Host "      [SKIP] PID $pidToStop is '$pname' (not matching $name). Skipped to protect unrelated process." -ForegroundColor Yellow
+                return
+            }
             Write-Host "Stopping $name (PID $pidToStop)..." -ForegroundColor Yellow
-            Stop-Process -Id $pidToStop -Force -ErrorAction SilentlyContinue
+            $proc.CloseMainWindow() | Out-Null
+            Start-Sleep -Milliseconds 250
+            if (-not $proc.HasExited) {
+                Stop-Process -Id $pidToStop -Force -ErrorAction SilentlyContinue
+            }
             Write-Host "      [OK] $name terminated safely." -ForegroundColor Green
         } else {
             Write-Host "      [INFO] $name (PID $pidToStop) was already stopped." -ForegroundColor Gray
@@ -41,11 +54,11 @@ function Stop-SpecificProcess {
 }
 
 if ($pidsContent.backend_pid) {
-    Stop-SpecificProcess -pidToStop $pidsContent.backend_pid -name "FastAPI Backend"
+    Stop-SpecificProcess -pidToStop $pidsContent.backend_pid -name "FastAPI Backend" -expectedNames @("python", "py")
 }
 
 if ($pidsContent.frontend_pid) {
-    Stop-SpecificProcess -pidToStop $pidsContent.frontend_pid -name "Vite Frontend Server"
+    Stop-SpecificProcess -pidToStop $pidsContent.frontend_pid -name "Vite Frontend Server" -expectedNames @("node", "cmd")
 }
 
 # Clean up PID record file

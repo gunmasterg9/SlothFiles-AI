@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   FolderTree,
   Clock,
@@ -35,7 +35,18 @@ import {
   FileSpreadsheet,
   Download,
   Send,
-  Wrench
+  Wrench,
+  FilePlus,
+  FileEdit,
+  FileX,
+  ArrowRightLeft,
+  Folder,
+  Filter,
+  Sliders,
+  HelpCircle,
+  Plus,
+  Pencil,
+  Eye
 } from 'lucide-react';
 import {
   fetchHealth,
@@ -47,6 +58,14 @@ import {
   removeApprovedRoot,
   fetchAuditLogs,
   scanFolder,
+  fetchOrganizationRules,
+  createOrganizationRule,
+  updateOrganizationRule,
+  deleteOrganizationRule,
+  toggleOrganizationRule,
+  testOrganizationRule,
+  fetchTemplateVariables,
+  previewTemplate,
   fetchPendingApprovals,
   approvePlan,
   rejectPlan,
@@ -70,6 +89,8 @@ import {
   fetchCopilotSessions,
   fetchCopilotMessages,
   sendCopilotPrompt,
+  fetchWatcherEvents,
+  clearWatcherEvents,
   type HealthResponse,
   type ReadinessResponse,
   type SystemSettings,
@@ -77,14 +98,87 @@ import {
   type AuditLogEntry,
   type ActionPlan,
   type ScanResult,
+  type OrganizationRule,
+  type RuleCreate,
+  type RuleTestResponse,
+  type TemplateVariableInfo,
   type FolderWatch,
   type TaskRecord,
   type InboxItem,
   type ShipmentAudit,
   type CopilotTool,
   type CopilotSession,
-  type CopilotMessage
+  type CopilotMessage,
+  type WatcherEvent
 } from './services/api';
+
+function formatBytes(bytes?: number | null): string {
+  if (bytes === undefined || bytes === null) return '-';
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+function getFilename(pathStr?: string | null): string {
+  if (!pathStr) return '';
+  const normalized = pathStr.replace(/\\/g, '/');
+  const parts = normalized.split('/');
+  return parts[parts.length - 1] || pathStr;
+}
+
+function formatLocaleTime(isoStr: string): { time: string; full: string } {
+  try {
+    const d = new Date(isoStr);
+    return {
+      time: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      full: d.toLocaleString()
+    };
+  } catch {
+    return { time: isoStr, full: isoStr };
+  }
+}
+
+function getEventBadge(eventType: string, isDirectory: boolean) {
+  switch (eventType) {
+    case 'created':
+      return {
+        label: isDirectory ? 'FOLDER CREATED' : 'FILE CREATED',
+        icon: isDirectory ? FolderPlus : FilePlus,
+        badgeStyle: 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400',
+        cardBorder: 'hover:border-emerald-500/30'
+      };
+    case 'modified':
+      return {
+        label: isDirectory ? 'DIR MODIFIED' : 'FILE MODIFIED',
+        icon: FileEdit,
+        badgeStyle: 'bg-amber-500/15 border-amber-500/30 text-amber-400',
+        cardBorder: 'hover:border-amber-500/30'
+      };
+    case 'moved':
+      return {
+        label: isDirectory ? 'FOLDER MOVED' : 'RENAMED / MOVED',
+        icon: ArrowRightLeft,
+        badgeStyle: 'bg-sky-500/15 border-sky-500/30 text-sky-400',
+        cardBorder: 'hover:border-sky-500/30'
+      };
+    case 'deleted':
+      return {
+        label: isDirectory ? 'FOLDER DELETED' : 'FILE DELETED',
+        icon: FileX,
+        badgeStyle: 'bg-rose-500/15 border-rose-500/30 text-rose-400',
+        cardBorder: 'hover:border-rose-500/30'
+      };
+    default:
+      return {
+        label: eventType.toUpperCase(),
+        icon: Activity,
+        badgeStyle: 'bg-slate-500/15 border-slate-500/30 text-slate-400',
+        cardBorder: 'hover:border-slate-700'
+      };
+  }
+}
 
 type Tab =
   | 'overview'
@@ -119,14 +213,67 @@ export default function App() {
   const [newRootPath, setNewRootPath] = useState<string>('');
   const [newRootLabel, setNewRootLabel] = useState<string>('');
 
-  // Organizer scan states
+  // Organizer scan & rules states
+  const [organizerSubTab, setOrganizerSubTab] = useState<'scan' | 'rules'>('scan');
   const [scanFolderInput, setScanFolderInput] = useState<string>('');
   const [useAiClassification, setUseAiClassification] = useState<boolean>(true);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [latestScanResult, setLatestScanResult] = useState<ScanResult | null>(null);
 
-  // LazyDesk form states
+  // Organization Rules & Templates states
+  const [rules, setRules] = useState<OrganizationRule[]>([]);
+  const [rulesLoading, setRulesLoading] = useState<boolean>(false);
+  const [templateVariables, setTemplateVariables] = useState<TemplateVariableInfo[]>([]);
+  const [exampleTemplates, setExampleTemplates] = useState<string[]>([]);
+  const [ruleModalOpen, setRuleModalOpen] = useState<boolean>(false);
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+
+  // Form states for Create/Edit Rule
+  const [ruleFormName, setRuleFormName] = useState<string>('');
+  const [ruleFormDescription, setRuleFormDescription] = useState<string>('');
+  const [ruleFormPriority, setRuleFormPriority] = useState<number>(100);
+  const [ruleFormEnabled, setRuleFormEnabled] = useState<boolean>(true);
+  const [ruleFormExtensions, setRuleFormExtensions] = useState<string>('');
+  const [ruleFormGlob, setRuleFormGlob] = useState<string>('');
+  const [ruleFormRegex, setRuleFormRegex] = useState<string>('');
+  const [ruleFormTemplate, setRuleFormTemplate] = useState<string>('{year}/{month}/{stem}.{extension}');
+  const [ruleFormError, setRuleFormError] = useState<string | null>(null);
+  const [ruleFormSaving, setRuleFormSaving] = useState<boolean>(false);
+
+  // Live destination preview inside modal
+  const [modalPreviewFilename, setModalPreviewFilename] = useState<string>('invoice_2026_q3.pdf');
+  const [modalPreviewCategory, setModalPreviewCategory] = useState<string>('Invoices & Receipts');
+  const [modalPreviewDestination, setModalPreviewDestination] = useState<string>('');
+  const [modalPreviewError, setModalPreviewError] = useState<string | null>(null);
+
+  // Interactive Test-a-Rule Sandbox
+  const [showTestSandbox, setShowTestSandbox] = useState<boolean>(true);
+  const [showVariableGuide, setShowVariableGuide] = useState<boolean>(false);
+  const [testFilename, setTestFilename] = useState<string>('contract_agreement_v2.pdf');
+  const [testCategory, setTestCategory] = useState<string>('Contracts & Legal');
+  const [testSelectedRuleId, setTestSelectedRuleId] = useState<string>('all');
+  const [testResult, setTestResult] = useState<RuleTestResponse | null>(null);
+  const [isTestingRule, setIsTestingRule] = useState<boolean>(false);
+  const [testRuleError, setTestRuleError] = useState<string | null>(null);
+
+  // Delete Rule confirmation
+  const [deleteRuleTarget, setDeleteRuleTarget] = useState<OrganizationRule | null>(null);
+  const [isDeletingRule, setIsDeletingRule] = useState<boolean>(false);
+
+  // LazyDesk & Activity Timeline states
+  const [lazyDeskSubTab, setLazyDeskSubTab] = useState<'activity' | 'monitors'>('activity');
   const [watchFolderInput, setWatchFolderInput] = useState<string>('');
+  const [watcherEvents, setWatcherEvents] = useState<WatcherEvent[]>([]);
+  const [isWatcherLoading, setIsWatcherLoading] = useState<boolean>(false);
+  const [isWatcherFetching, setIsWatcherFetching] = useState<boolean>(false);
+  const [isWatcherPolling, setIsWatcherPolling] = useState<boolean>(true);
+  const [watcherError, setWatcherError] = useState<string | null>(null);
+  const [watcherEventTypeFilter, setWatcherEventTypeFilter] = useState<string>('all');
+  const [watcherFolderFilter, setWatcherFolderFilter] = useState<string>('all');
+  const [watcherSearchQuery, setWatcherSearchQuery] = useState<string>('');
+  const [confirmClearFeedModal, setConfirmClearFeedModal] = useState<boolean>(false);
+  const [isClearingFeed, setIsClearingFeed] = useState<boolean>(false);
+  const isFetchingWatcherRef = useRef<boolean>(false);
 
   // Inbox & Notes states
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
@@ -158,7 +305,7 @@ export default function App() {
     try {
       setLoading(true);
       setError(null);
-      const [h, r, s, m, a, p, w, t, inb, aud] = await Promise.all([
+      const [h, r, s, m, a, p, w, t, inb, aud, rls, tpls] = await Promise.all([
         fetchHealth().catch(() => null),
         fetchReadiness().catch(() => null),
         fetchSettings().catch(() => null),
@@ -168,7 +315,9 @@ export default function App() {
         fetchWatches().catch(() => []),
         fetchTasks(undefined, 20).catch(() => []),
         fetchInboxItems(inboxSearchQuery || undefined).catch(() => []),
-        fetchShipmentAudits().catch(() => [])
+        fetchShipmentAudits().catch(() => []),
+        fetchOrganizationRules().catch(() => []),
+        fetchTemplateVariables().catch(() => null)
       ]);
 
       if (h) setHealth(h);
@@ -188,6 +337,11 @@ export default function App() {
       if (p) setPendingPlans(p);
       if (w) setWatches(w);
       if (t) setTasks(t);
+      if (rls) setRules(rls);
+      if (tpls) {
+        setTemplateVariables(tpls.variables || []);
+        setExampleTemplates(tpls.example_templates || []);
+      }
       if (inb) {
         setInboxItems(inb);
         setSelectedInboxItem((prev) => {
@@ -399,6 +553,163 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  const loadRules = async () => {
+    try {
+      setRulesLoading(true);
+      const data = await fetchOrganizationRules();
+      setRules(data);
+    } catch (err: any) {
+      console.error('Failed to load rules:', err);
+    } finally {
+      setRulesLoading(false);
+    }
+  };
+
+  const triggerModalPreview = async (templateStr: string, sampleFilename: string, catName: string) => {
+    if (!templateStr.trim()) {
+      setModalPreviewDestination('');
+      setModalPreviewError('Destination template cannot be empty.');
+      return;
+    }
+    try {
+      const res = await previewTemplate({
+        template: templateStr.trim(),
+        sample_filename: sampleFilename.trim() || 'sample_document.pdf',
+        category: catName.trim() || 'Invoices & Receipts'
+      });
+      setModalPreviewDestination(res.resolved_destination);
+      setModalPreviewError(null);
+    } catch (err: any) {
+      setModalPreviewDestination('');
+      setModalPreviewError(err.message || 'Invalid template syntax.');
+    }
+  };
+
+  const handleOpenCreateRule = () => {
+    setEditingRuleId(null);
+    setRuleFormName('');
+    setRuleFormDescription('');
+    setRuleFormPriority(100);
+    setRuleFormEnabled(true);
+    setRuleFormExtensions('');
+    setRuleFormGlob('');
+    setRuleFormRegex('');
+    const defaultTemplate = '{year}/{month}/{stem}.{extension}';
+    setRuleFormTemplate(defaultTemplate);
+    setRuleFormError(null);
+    setModalPreviewFilename('invoice_2026_q3.pdf');
+    setModalPreviewCategory('Invoices & Receipts');
+    setRuleModalOpen(true);
+    triggerModalPreview(defaultTemplate, 'invoice_2026_q3.pdf', 'Invoices & Receipts');
+  };
+
+  const handleOpenEditRule = (rule: OrganizationRule) => {
+    setEditingRuleId(rule.id);
+    setRuleFormName(rule.name);
+    setRuleFormDescription(rule.description || '');
+    setRuleFormPriority(rule.priority);
+    setRuleFormEnabled(rule.is_enabled);
+    setRuleFormExtensions(rule.match_extensions || '');
+    setRuleFormGlob(rule.match_glob || '');
+    setRuleFormRegex(rule.match_regex || '');
+    setRuleFormTemplate(rule.destination_template);
+    setRuleFormError(null);
+    setModalPreviewFilename('sample_document.pdf');
+    setModalPreviewCategory(rule.name);
+    setRuleModalOpen(true);
+    triggerModalPreview(rule.destination_template, 'sample_document.pdf', rule.name);
+  };
+
+  const handleSaveRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!ruleFormName.trim()) {
+      setRuleFormError('Rule name is required.');
+      return;
+    }
+    if (!ruleFormTemplate.trim()) {
+      setRuleFormError('Destination template is required.');
+      return;
+    }
+
+    try {
+      setRuleFormSaving(true);
+      setRuleFormError(null);
+
+      const payload: RuleCreate = {
+        name: ruleFormName.trim(),
+        description: ruleFormDescription.trim(),
+        priority: Number(ruleFormPriority) || 100,
+        is_enabled: ruleFormEnabled,
+        match_extensions: ruleFormExtensions.trim(),
+        match_glob: ruleFormGlob.trim(),
+        match_regex: ruleFormRegex.trim(),
+        destination_template: ruleFormTemplate.trim(),
+        action_type: 'move'
+      };
+
+      if (editingRuleId) {
+        await updateOrganizationRule(editingRuleId, payload);
+        setActionNotice(`Organization rule '${ruleFormName}' updated successfully.`);
+      } else {
+        await createOrganizationRule(payload);
+        setActionNotice(`New organization rule '${ruleFormName}' created.`);
+      }
+
+      setRuleModalOpen(false);
+      await loadRules();
+    } catch (err: any) {
+      setRuleFormError(err.message || 'Failed to save organization rule.');
+    } finally {
+      setRuleFormSaving(false);
+    }
+  };
+
+  const handleToggleRule = async (ruleId: string) => {
+    try {
+      const updated = await toggleOrganizationRule(ruleId);
+      setRules((prev) => prev.map((r) => (r.id === ruleId ? updated : r)));
+      setActionNotice(`Rule '${updated.name}' is now ${updated.is_enabled ? 'ENABLED' : 'DISABLED'}.`);
+    } catch (err: any) {
+      setActionNotice(`Failed to toggle rule: ${err.message}`);
+    }
+  };
+
+  const handleDeleteRule = async () => {
+    if (!deleteRuleTarget) return;
+    try {
+      setIsDeletingRule(true);
+      await deleteOrganizationRule(deleteRuleTarget.id);
+      setActionNotice(`Organization rule '${deleteRuleTarget.name}' deleted.`);
+      setRules((prev) => prev.filter((r) => r.id !== deleteRuleTarget.id));
+      setDeleteRuleTarget(null);
+    } catch (err: any) {
+      setActionNotice(`Failed to delete rule: ${err.message}`);
+    } finally {
+      setIsDeletingRule(false);
+    }
+  };
+
+  const handleRunRuleTest = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!testFilename.trim()) return;
+
+    try {
+      setIsTestingRule(true);
+      setTestRuleError(null);
+      const res = await testOrganizationRule({
+        sample_filename: testFilename.trim(),
+        sample_category: testCategory.trim() || undefined,
+        rule_id: testSelectedRuleId === 'all' ? undefined : testSelectedRuleId
+      });
+      setTestResult(res);
+    } catch (err: any) {
+      setTestRuleError(err.message || 'Rule testing failed.');
+      setTestResult(null);
+    } finally {
+      setIsTestingRule(false);
+    }
+  };
+
   const handleScan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!scanFolderInput.trim()) return;
@@ -486,6 +797,85 @@ export default function App() {
     } catch (err: any) {
       setActionNotice(`Error: ${err.message}`);
     }
+  };
+
+  const fetchEvents = useCallback(async (isInitial = false) => {
+    if (isFetchingWatcherRef.current) return;
+    isFetchingWatcherRef.current = true;
+    if (isInitial) setIsWatcherLoading(true);
+    setIsWatcherFetching(true);
+    try {
+      const resp = await fetchWatcherEvents(undefined, undefined, 1000, 0);
+      setWatcherEvents(resp.events || []);
+      setWatcherError(null);
+    } catch (err: any) {
+      setWatcherError(err.message || 'Failed to fetch watcher events.');
+    } finally {
+      isFetchingWatcherRef.current = false;
+      if (isInitial) setIsWatcherLoading(false);
+      setIsWatcherFetching(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'lazydesk' || !isWatcherPolling) {
+      return;
+    }
+
+    // Trigger immediate fetch upon opening LazyDesk or resuming polling
+    fetchEvents(true);
+
+    const intervalId = setInterval(() => {
+      fetchEvents(false);
+    }, 1500);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [activeTab, isWatcherPolling, fetchEvents]);
+
+  const handleClearWatcherFeed = async () => {
+    try {
+      setIsClearingFeed(true);
+      await clearWatcherEvents();
+      setWatcherEvents([]);
+      setConfirmClearFeedModal(false);
+      setActionNotice('In-memory watcher activity feed cleared. Permanent SQLite audit logs remain untouched.');
+    } catch (err: any) {
+      setActionNotice(`Failed to clear watcher activity: ${err.message}`);
+    } finally {
+      setIsClearingFeed(false);
+    }
+  };
+
+  const filteredWatcherEvents = watcherEvents.filter((ev) => {
+    if (watcherEventTypeFilter !== 'all' && ev.event_type !== watcherEventTypeFilter) {
+      return false;
+    }
+    if (watcherFolderFilter !== 'all' && ev.watch_id !== watcherFolderFilter && ev.folder_path !== watcherFolderFilter) {
+      return false;
+    }
+    if (watcherSearchQuery.trim()) {
+      const q = watcherSearchQuery.toLowerCase().trim();
+      const pathMatch = ev.path?.toLowerCase().includes(q);
+      const relMatch = ev.relative_path?.toLowerCase().includes(q);
+      const prevPathMatch = ev.previous_path?.toLowerCase().includes(q);
+      const prevRelMatch = ev.previous_relative_path?.toLowerCase().includes(q);
+      const fn = getFilename(ev.path || ev.relative_path).toLowerCase();
+      const fnMatch = fn.includes(q);
+      if (!pathMatch && !relMatch && !prevPathMatch && !prevRelMatch && !fnMatch) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  const watcherEventCounts = {
+    all: watcherEvents.length,
+    created: watcherEvents.filter((e) => e.event_type === 'created').length,
+    modified: watcherEvents.filter((e) => e.event_type === 'modified').length,
+    moved: watcherEvents.filter((e) => e.event_type === 'moved').length,
+    deleted: watcherEvents.filter((e) => e.event_type === 'deleted').length
   };
 
   const handleCancelTask = async (taskId: string) => {
@@ -854,137 +1244,823 @@ export default function App() {
           )}
 
           {activeTab === 'organizer' && (
-            <div className="space-y-6 max-w-5xl mx-auto">
-              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+            <div className="space-y-6 max-w-6xl mx-auto pb-10">
+              {/* Organizer Header and Sub-tab Navigation */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                 <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <FolderTree className="w-4 h-4 text-emerald-400" />
-                    Smart Folder Scan & Organization
-                  </h3>
+                  <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                    <FolderTree className="w-5 h-5 text-emerald-400" />
+                    Smart File Organizer
+                  </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Select an approved root directory to index file metadata, detect exact SHA-256 duplicates, and generate proposed move plans.
+                    Deterministic organization rules, reusable destination templates, and local AI fallback.
                   </p>
                 </div>
 
-                <form onSubmit={handleScan} className="space-y-3 pt-2">
-                  <div className="flex gap-2">
-                    <select
-                      value={scanFolderInput}
-                      onChange={(e) => setScanFolderInput(e.target.value)}
-                      className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
-                    >
-                      <option value="">-- Select an approved root --</option>
-                      {systemSettings?.approved_roots.map((r) => (
-                        <option key={r.id} value={r.path}>
-                          {r.label} ({r.path})
-                        </option>
-                      ))}
-                    </select>
+                <div className="flex items-center gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-slate-800 self-start sm:self-auto">
+                  <button
+                    onClick={() => setOrganizerSubTab('scan')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition ${
+                      organizerSubTab === 'scan'
+                        ? 'bg-emerald-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    <span>Folder Scanner & Plans</span>
+                  </button>
 
-                    <button
-                      type="submit"
-                      disabled={isScanning || !scanFolderInput}
-                      className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-2 transition disabled:opacity-50"
-                    >
-                      {isScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                      <span>{isScanning ? 'Analyzing...' : 'Scan & Plan'}</span>
-                    </button>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <input
-                      type="checkbox"
-                      id="ai-classify"
-                      checked={useAiClassification}
-                      onChange={(e) => setUseAiClassification(e.target.checked)}
-                      className="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-0"
-                    />
-                    <label htmlFor="ai-classify" className="cursor-pointer select-none">
-                      Enable local open-weight AI classification ({systemSettings?.ollama_selected_model || 'Ollama'})
-                    </label>
-                  </div>
-                </form>
+                  <button
+                    onClick={() => setOrganizerSubTab('rules')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition ${
+                      organizerSubTab === 'rules'
+                        ? 'bg-emerald-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <Sliders className="w-3.5 h-3.5" />
+                    <span>Rules & Templates</span>
+                    <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-emerald-950 text-emerald-200 border border-emerald-400/30">
+                      {rules.length}
+                    </span>
+                  </button>
+                </div>
               </div>
 
-              {latestScanResult && latestScanResult.plan && (
-                <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              {/* Sub-tab 1: Folder Scanner & Execution Plans */}
+              {organizerSubTab === 'scan' && (
+                <div className="space-y-6 max-w-5xl mx-auto">
+                  <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
                     <div>
-                      <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                        <FileCheck className="w-4 h-4 text-emerald-400" />
-                        Proposed Action Plan: {latestScanResult.plan.title}
-                      </h4>
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <FolderTree className="w-4 h-4 text-emerald-400" />
+                        Smart Folder Scan & Organization
+                      </h3>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        {latestScanResult.actions_planned} files ready to organize. Review before approving.
+                        Select an approved root directory to index file metadata, detect exact SHA-256 duplicates, evaluate deterministic organization rules, and generate proposed move plans.
                       </p>
                     </div>
 
-                    <div className="flex gap-2">
+                    <form onSubmit={handleScan} className="space-y-3 pt-2">
+                      <div className="flex gap-2">
+                        <select
+                          value={scanFolderInput}
+                          onChange={(e) => setScanFolderInput(e.target.value)}
+                          className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
+                        >
+                          <option value="">-- Select an approved root --</option>
+                          {systemSettings?.approved_roots.map((r) => (
+                            <option key={r.id} value={r.path}>
+                              {r.label} ({r.path})
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          type="submit"
+                          disabled={isScanning || !scanFolderInput}
+                          className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-2 transition disabled:opacity-50"
+                        >
+                          {isScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                          <span>{isScanning ? 'Analyzing...' : 'Scan & Plan'}</span>
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-2 text-xs text-slate-400">
+                        <input
+                          type="checkbox"
+                          id="ai-classify"
+                          checked={useAiClassification}
+                          onChange={(e) => setUseAiClassification(e.target.checked)}
+                          className="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-0"
+                        />
+                        <label htmlFor="ai-classify" className="cursor-pointer select-none">
+                          Enable local open-weight AI fallback classification ({systemSettings?.ollama_selected_model || 'Ollama'}) if no rules match
+                        </label>
+                      </div>
+                    </form>
+                  </div>
+
+                  {latestScanResult && latestScanResult.plan && (
+                    <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                        <div>
+                          <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                            <FileCheck className="w-4 h-4 text-emerald-400" />
+                            Proposed Action Plan: {latestScanResult.plan.title}
+                          </h4>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {latestScanResult.actions_planned} files ready to organize. Review before approving.
+                          </p>
+                        </div>
+
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleRejectPlan(latestScanResult.plan!.id)}
+                            className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 text-xs font-medium flex items-center gap-1.5 transition"
+                          >
+                            <X className="w-3.5 h-3.5 text-rose-400" />
+                            <span>Reject</span>
+                          </button>
+                          <button
+                            onClick={() => handleApprovePlan(latestScanResult.plan!.id)}
+                            className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-lg shadow-emerald-500/20"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Approve & Execute</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        {latestScanResult.plan.items.map((item) => (
+                          <div key={item.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs">
+                            <div className="space-y-1 max-w-2xl">
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-white truncate max-w-sm" title={item.source_path}>
+                                  {item.source_path.split('\\').pop() || item.source_path.split('/').pop()}
+                                </span>
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-600" />
+                                <span className="font-mono text-[11px] text-emerald-400 truncate max-w-sm" title={item.target_path}>
+                                  {item.target_path.split('\\').slice(-2).join('/')}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-400">Reason: {item.reason}</p>
+                            </div>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                              {item.action_type.toUpperCase()}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {completedPlans.length > 0 && (
+                    <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                      <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                        <RotateCcw className="w-4 h-4 text-purple-400" />
+                        Executed Plans & Safe Undo
+                      </h4>
+                      <div className="space-y-2">
+                        {completedPlans.map((plan) => (
+                          <div key={plan.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs">
+                            <div>
+                              <div className="font-semibold text-white">{plan.title}</div>
+                              <div className="text-[11px] text-slate-400">
+                                Executed {plan.items.length} moves • {plan.executed_at?.slice(0, 19).replace('T', ' ')} UTC
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleUndoPlan(plan.id)}
+                              className="px-3 py-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 text-xs font-medium flex items-center gap-1.5 transition"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>Undo & Restore</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Sub-tab 2: Rules & Reusable Templates */}
+              {organizerSubTab === 'rules' && (
+                <div className="space-y-6">
+                  {/* Action Bar & Quick Controls */}
+                  <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <Sliders className="w-4 h-4 text-emerald-400" />
+                        Deterministic Organization Rules
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Priority-ordered rules evaluate filename patterns and file extensions first. Unmatched files fallback to local AI.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
-                        onClick={() => handleRejectPlan(latestScanResult.plan!.id)}
-                        className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 text-xs font-medium flex items-center gap-1.5 transition"
+                        onClick={() => setShowVariableGuide(!showVariableGuide)}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-1.5 transition border ${
+                          showVariableGuide
+                            ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                            : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
+                        }`}
                       >
-                        <X className="w-3.5 h-3.5 text-rose-400" />
-                        <span>Reject</span>
+                        <HelpCircle className="w-3.5 h-3.5" />
+                        <span>Variable Guide</span>
                       </button>
+
                       <button
-                        onClick={() => handleApprovePlan(latestScanResult.plan!.id)}
-                        className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-lg shadow-emerald-500/20"
+                        onClick={() => setShowTestSandbox(!showTestSandbox)}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-1.5 transition border ${
+                          showTestSandbox
+                            ? 'bg-sky-500/20 border-sky-500/40 text-sky-300'
+                            : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
+                        }`}
                       >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Approve & Execute</span>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Test-a-Rule Sandbox</span>
+                      </button>
+
+                      <button
+                        onClick={handleOpenCreateRule}
+                        className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-lg shadow-emerald-500/20"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Add Organization Rule</span>
                       </button>
                     </div>
                   </div>
 
-                  <div className="space-y-2">
-                    {latestScanResult.plan.items.map((item) => (
-                      <div key={item.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs">
-                        <div className="space-y-1 max-w-2xl">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold text-white truncate max-w-sm" title={item.source_path}>
-                              {item.source_path.split('\\').pop() || item.source_path.split('/').pop()}
-                            </span>
-                            <ChevronRight className="w-3.5 h-3.5 text-slate-600" />
-                            <span className="font-mono text-[11px] text-emerald-400 truncate max-w-sm" title={item.target_path}>
-                              {item.target_path.split('\\').slice(-2).join('/')}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400">Reason: {item.reason}</p>
+                  {/* Variable Reference Guide Drawer */}
+                  {showVariableGuide && (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-5 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-amber-400">
+                          <HelpCircle className="w-4 h-4" />
+                          <h4 className="text-xs font-bold uppercase tracking-wider">Template Variables & Date Semantics</h4>
                         </div>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/30">
-                          {item.action_type.toUpperCase()}
+                        <span className="text-[11px] text-amber-300/80 font-mono">Date Source: st_mtime (UTC)</span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {templateVariables.map((v) => (
+                          <div key={v.variable} className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="font-mono text-xs font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                                {v.variable}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-mono">e.g. {v.example}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-300 leading-relaxed">{v.description}</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="pt-2 border-t border-amber-500/20">
+                        <span className="text-[11px] font-semibold text-slate-300 block mb-2">Click an example template to load into rule builder:</span>
+                        <div className="flex flex-wrap gap-2">
+                          {exampleTemplates.map((tpl) => (
+                            <button
+                              key={tpl}
+                              onClick={() => {
+                                handleOpenCreateRule();
+                                setRuleFormTemplate(tpl);
+                                triggerModalPreview(tpl, 'sample.pdf', 'General');
+                              }}
+                              className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-mono text-emerald-300 transition"
+                            >
+                              {tpl}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Interactive Test-a-Rule Sandbox */}
+                  {showTestSandbox && (
+                    <div className="rounded-xl border border-sky-500/30 bg-[#111726]/80 p-5 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-sky-400">
+                          <Eye className="w-4 h-4" />
+                          <h4 className="text-xs font-bold uppercase tracking-wider">Test-a-Rule Interactive Sandbox</h4>
+                        </div>
+                        <span className="text-[11px] text-slate-400">Evaluate sample filenames against active rules without modifying files</span>
+                      </div>
+
+                      <form onSubmit={handleRunRuleTest} className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                        <div className="sm:col-span-4 space-y-1">
+                          <label className="text-[11px] text-slate-400 block font-medium">Sample Filename to Test</label>
+                          <input
+                            type="text"
+                            value={testFilename}
+                            onChange={(e) => setTestFilename(e.target.value)}
+                            placeholder="e.g. invoice_2026_10.pdf"
+                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-3 space-y-1">
+                          <label className="text-[11px] text-slate-400 block font-medium">Sample Category ({'{category}'})</label>
+                          <input
+                            type="text"
+                            value={testCategory}
+                            onChange={(e) => setTestCategory(e.target.value)}
+                            placeholder="e.g. Invoices & Receipts"
+                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-sky-500"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-3 space-y-1">
+                          <label className="text-[11px] text-slate-400 block font-medium">Evaluation Scope</label>
+                          <select
+                            value={testSelectedRuleId}
+                            onChange={(e) => setTestSelectedRuleId(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-sky-500"
+                          >
+                            <option value="all">Evaluate All Active Rules (First Match)</option>
+                            {rules.map((r) => (
+                              <option key={r.id} value={r.id}>
+                                #{r.priority} - {r.name} {r.is_enabled ? '' : '(Disabled)'}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="sm:col-span-2">
+                          <button
+                            type="submit"
+                            disabled={isTestingRule || !testFilename.trim()}
+                            className="w-full py-2 px-3 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                          >
+                            {isTestingRule ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                            <span>Test Match</span>
+                          </button>
+                        </div>
+                      </form>
+
+                      {testRuleError && (
+                        <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
+                          {testRuleError}
+                        </div>
+                      )}
+
+                      {testResult && (
+                        <div className={`p-4 rounded-lg border text-xs space-y-2 ${
+                          testResult.matched
+                            ? 'bg-emerald-950/20 border-emerald-500/40 text-emerald-200'
+                            : 'bg-amber-950/20 border-amber-500/40 text-amber-200'
+                        }`}>
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold flex items-center gap-1.5">
+                              {testResult.matched ? (
+                                <>
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                                  <span className="text-emerald-300">RULE MATCHED: {testResult.rule_name}</span>
+                                  {testResult.priority && (
+                                    <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono text-[10px]">
+                                      Priority #{testResult.priority}
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <>
+                                  <AlertTriangle className="w-4 h-4 text-amber-400" />
+                                  <span className="text-amber-300">NO RULE MATCHED</span>
+                                </>
+                              )}
+                            </span>
+                            <span className="font-mono text-[11px] text-slate-400">{testFilename}</span>
+                          </div>
+
+                          <p className="text-[11px] text-slate-300 leading-relaxed">
+                            <strong>Reason:</strong> {testResult.reason}
+                          </p>
+
+                          {testResult.resolved_destination && (
+                            <div className="pt-2 border-t border-emerald-500/20 flex items-center gap-2">
+                              <span className="text-[11px] text-slate-400 font-semibold">Resolved Destination:</span>
+                              <span className="font-mono text-emerald-300 font-bold bg-slate-900/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                                {testResult.resolved_destination}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Rules List / Table */}
+                  <div className="rounded-xl border border-slate-800 bg-[#111726]/60 overflow-hidden">
+                    <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-white uppercase tracking-wider">Active Rule Pipeline</span>
+                        {rulesLoading && <RefreshCw className="w-3 h-3 animate-spin text-emerald-400" />}
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-300">
+                          {rules.filter((r) => r.is_enabled).length} of {rules.length} Enabled
                         </span>
                       </div>
-                    ))}
+                      <span className="text-[11px] text-slate-400">Evaluated in ascending priority order (1 = highest)</span>
+                    </div>
+
+                    {rules.length === 0 ? (
+                      <div className="p-12 text-center space-y-3">
+                        <Sliders className="w-8 h-8 text-slate-600 mx-auto" />
+                        <h4 className="text-sm font-semibold text-white">No organization rules defined</h4>
+                        <p className="text-xs text-slate-400 max-w-md mx-auto">
+                          Create your first rule to automatically categorize and route files to safe destination templates.
+                        </p>
+                        <button
+                          onClick={handleOpenCreateRule}
+                          className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Create First Rule</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-slate-800/80">
+                        {rules.map((rule) => (
+                          <div
+                            key={rule.id}
+                            className={`p-4 transition flex flex-col md:flex-row md:items-center justify-between gap-4 ${
+                              rule.is_enabled ? 'bg-slate-900/30 hover:bg-slate-900/60' : 'bg-slate-950/40 opacity-70'
+                            }`}
+                          >
+                            <div className="space-y-1.5 max-w-xl">
+                              <div className="flex items-center gap-2.5">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                                  rule.is_enabled
+                                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                                    : 'bg-slate-800 border-slate-700 text-slate-400'
+                                }`}>
+                                  #{rule.priority}
+                                </span>
+                                <span className="font-semibold text-white text-xs">{rule.name}</span>
+                                {rule.action_type && (
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-mono bg-blue-500/10 text-blue-300 border border-blue-500/20">
+                                    {rule.action_type.toUpperCase()}
+                                  </span>
+                                )}
+                              </div>
+
+                              {rule.description && (
+                                <p className="text-[11px] text-slate-400">{rule.description}</p>
+                              )}
+
+                              {/* Match Criteria Badges */}
+                              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                {rule.match_extensions && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-purple-500/15 border border-purple-500/30 text-purple-300">
+                                    ext: {rule.match_extensions}
+                                  </span>
+                                )}
+                                {rule.match_glob && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-sky-500/15 border border-sky-500/30 text-sky-300">
+                                    glob: {rule.match_glob}
+                                  </span>
+                                )}
+                                {rule.match_regex && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 border border-amber-500/30 text-amber-300">
+                                    regex: {rule.match_regex}
+                                  </span>
+                                )}
+                                {!rule.match_extensions && !rule.match_glob && !rule.match_regex && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 border border-slate-700 text-slate-400">
+                                    all files
+                                  </span>
+                                )}
+                                <ChevronRight className="w-3 h-3 text-slate-600" />
+                                <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900 border border-emerald-500/30 text-emerald-300 font-bold">
+                                  {rule.destination_template}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Actions and Toggle */}
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                onClick={() => handleToggleRule(rule.id)}
+                                title={rule.is_enabled ? 'Click to disable' : 'Click to enable'}
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition flex items-center gap-1.5 ${
+                                  rule.is_enabled
+                                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'
+                                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
+                                }`}
+                              >
+                                {rule.is_enabled ? (
+                                  <>
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                    <span>Enabled</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                                    <span>Disabled</span>
+                                  </>
+                                )}
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  setShowTestSandbox(true);
+                                  setTestSelectedRuleId(rule.id);
+                                  handleRunRuleTest();
+                                }}
+                                title="Test rule in sandbox"
+                                className="p-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+                              >
+                                <Play className="w-3.5 h-3.5 text-sky-400" />
+                              </button>
+
+                              <button
+                                onClick={() => handleOpenEditRule(rule)}
+                                title="Edit rule"
+                                className="p-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+                              >
+                                <Pencil className="w-3.5 h-3.5 text-amber-400" />
+                              </button>
+
+                              <button
+                                onClick={() => setDeleteRuleTarget(rule)}
+                                title="Delete rule"
+                                className="p-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 transition"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
 
-              {completedPlans.length > 0 && (
-                <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
-                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                    <RotateCcw className="w-4 h-4 text-purple-400" />
-                    Executed Plans & Safe Undo
-                  </h4>
-                  <div className="space-y-2">
-                    {completedPlans.map((plan) => (
-                      <div key={plan.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs">
-                        <div>
-                          <div className="font-semibold text-white">{plan.title}</div>
-                          <div className="text-[11px] text-slate-400">
-                            Executed {plan.items.length} moves • {plan.executed_at?.slice(0, 19).replace('T', ' ')} UTC
+              {/* Create / Edit Rule Modal */}
+              {ruleModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
+                  <div className="bg-[#111726] border border-slate-700 rounded-2xl max-w-xl w-full p-6 space-y-5 shadow-2xl my-8">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                      <div className="flex items-center gap-2">
+                        <Sliders className="w-5 h-5 text-emerald-400" />
+                        <h3 className="text-sm font-bold text-white">
+                          {editingRuleId ? `Edit Rule: ${ruleFormName}` : 'Create Organization Rule'}
+                        </h3>
+                      </div>
+                      <button
+                        onClick={() => setRuleModalOpen(false)}
+                        className="text-slate-400 hover:text-white transition"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <form onSubmit={handleSaveRule} className="space-y-4">
+                      {ruleFormError && (
+                        <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
+                          {ruleFormError}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                        <div className="sm:col-span-8 space-y-1">
+                          <label className="text-[11px] text-slate-300 font-medium block">
+                            Rule Name <span className="text-rose-400">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={ruleFormName}
+                            onChange={(e) => {
+                              setRuleFormName(e.target.value);
+                              triggerModalPreview(ruleFormTemplate, modalPreviewFilename, e.target.value);
+                            }}
+                            placeholder="e.g. Invoices & Receipts"
+                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-4 space-y-1">
+                          <label className="text-[11px] text-slate-300 font-medium block">
+                            Priority <span className="text-slate-500">(1-10000)</span>
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="10000"
+                            value={ruleFormPriority}
+                            onChange={(e) => setRuleFormPriority(parseInt(e.target.value, 10) || 100)}
+                            className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[11px] text-slate-300 font-medium block">Description</label>
+                        <input
+                          type="text"
+                          value={ruleFormDescription}
+                          onChange={(e) => setRuleFormDescription(e.target.value)}
+                          placeholder="Optional explanation of what this rule categorizes"
+                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+
+                      <div className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 space-y-3">
+                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
+                          Match Criteria (Evaluated Together)
+                        </span>
+
+                        <div className="space-y-2 text-xs">
+                          <div>
+                            <label className="text-[11px] text-slate-400 block mb-0.5">
+                              Extensions <span className="text-slate-500">(comma-separated, e.g. .pdf, .docx, .xlsx)</span>
+                            </label>
+                            <input
+                              type="text"
+                              value={ruleFormExtensions}
+                              onChange={(e) => setRuleFormExtensions(e.target.value)}
+                              placeholder=".pdf, .docx, .xlsx"
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[11px] text-slate-400 block mb-0.5">
+                              Filename Glob Pattern <span className="text-slate-500">(e.g. *invoice*, report_????_*)</span>
+                            </label>
+                            <input
+                              type="text"
+                              value={ruleFormGlob}
+                              onChange={(e) => setRuleFormGlob(e.target.value)}
+                              placeholder="*invoice*"
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[11px] text-slate-400 block mb-0.5">
+                              Regular Expression <span className="text-slate-500">(optional, e.g. (?i)^(inv|rec)-)</span>
+                            </label>
+                            <input
+                              type="text"
+                              value={ruleFormRegex}
+                              onChange={(e) => setRuleFormRegex(e.target.value)}
+                              placeholder="(?i)^(inv|rec)-"
+                              className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                            />
                           </div>
                         </div>
+                      </div>
+
+                      {/* Destination Template & Variables */}
+                      <div className="space-y-2">
+                        <label className="text-[11px] text-slate-300 font-medium block">
+                          Destination Template <span className="text-rose-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={ruleFormTemplate}
+                          onChange={(e) => {
+                            setRuleFormTemplate(e.target.value);
+                            triggerModalPreview(e.target.value, modalPreviewFilename, ruleFormName);
+                          }}
+                          placeholder="{year}/{month}/{stem}.{extension}"
+                          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-emerald-300 focus:outline-none focus:border-emerald-500 font-mono"
+                        />
+
+                        {/* Quick Variable Insert Chips */}
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          <span className="text-[10px] text-slate-400 mr-1">Insert variable:</span>
+                          {['{year}', '{month}', '{day}', '{stem}', '{extension}', '{category}'].map((v) => (
+                            <button
+                              key={v}
+                              type="button"
+                              onClick={() => {
+                                const updated = ruleFormTemplate ? `${ruleFormTemplate}/${v}` : v;
+                                setRuleFormTemplate(updated);
+                                triggerModalPreview(updated, modalPreviewFilename, ruleFormName);
+                              }}
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-emerald-300 border border-slate-700 transition"
+                            >
+                              + {v}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Live Destination Resolution Preview */}
+                      <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                            <Eye className="w-3 h-3 text-emerald-400" />
+                            Live Destination Preview
+                          </span>
+                          <span className="text-[10px] text-slate-500">Dates resolved from st_mtime (UTC)</span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div>
+                            <span className="text-[10px] text-slate-500 block mb-0.5">Sample Filename:</span>
+                            <input
+                              type="text"
+                              value={modalPreviewFilename}
+                              onChange={(e) => {
+                                setModalPreviewFilename(e.target.value);
+                                triggerModalPreview(ruleFormTemplate, e.target.value, modalPreviewCategory);
+                              }}
+                              className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono focus:outline-none"
+                            />
+                          </div>
+
+                          <div>
+                            <span className="text-[10px] text-slate-500 block mb-0.5">Category ({'{category}'}):</span>
+                            <input
+                              type="text"
+                              value={modalPreviewCategory}
+                              onChange={(e) => {
+                                setModalPreviewCategory(e.target.value);
+                                triggerModalPreview(ruleFormTemplate, modalPreviewFilename, e.target.value);
+                              }}
+                              className="w-full px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 focus:outline-none"
+                            />
+                          </div>
+
+                          <div>
+                            <span className="text-[10px] text-slate-500 block mb-0.5">Resolved Path:</span>
+                            <div className="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[11px] font-mono truncate">
+                              {modalPreviewError ? (
+                                <span className="text-rose-400">{modalPreviewError}</span>
+                              ) : (
+                                <span className="text-emerald-400 font-semibold">{modalPreviewDestination || '-'}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="rule-enabled-chk"
+                          checked={ruleFormEnabled}
+                          onChange={(e) => setRuleFormEnabled(e.target.checked)}
+                          className="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-0"
+                        />
+                        <label htmlFor="rule-enabled-chk" className="text-xs text-slate-300 select-none cursor-pointer">
+                          Enable this rule for active organization
+                        </label>
+                      </div>
+
+                      <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
                         <button
-                          onClick={() => handleUndoPlan(plan.id)}
-                          className="px-3 py-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 text-xs font-medium flex items-center gap-1.5 transition"
+                          type="button"
+                          onClick={() => setRuleModalOpen(false)}
+                          disabled={ruleFormSaving}
+                          className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
                         >
-                          <RotateCcw className="w-3 h-3" />
-                          <span>Undo & Restore</span>
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={ruleFormSaving || !ruleFormName.trim() || !ruleFormTemplate.trim()}
+                          className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+                        >
+                          {ruleFormSaving ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Check className="w-3.5 h-3.5" />
+                          )}
+                          <span>{editingRuleId ? 'Update Rule' : 'Save Rule'}</span>
                         </button>
                       </div>
-                    ))}
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {/* Delete Rule Confirmation Modal */}
+              {deleteRuleTarget && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                  <div className="bg-[#111726] border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+                    <div className="flex items-center gap-3 text-rose-400">
+                      <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
+                        <Trash2 className="w-5 h-5 text-rose-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white">Delete Organization Rule?</h3>
+                        <p className="text-[11px] text-slate-400">Rule: {deleteRuleTarget.name}</p>
+                      </div>
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      Are you sure you want to delete this rule? Any files previously organized by this rule will remain intact, but future scans will no longer apply this rule.
+                    </p>
+                    <div className="flex justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setDeleteRuleTarget(null)}
+                        disabled={isDeletingRule}
+                        className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDeleteRule}
+                        disabled={isDeletingRule}
+                        className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition flex items-center gap-1.5 shadow disabled:opacity-50"
+                      >
+                        {isDeletingRule ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                        <span>Delete Rule</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -992,92 +2068,603 @@ export default function App() {
           )}
 
           {activeTab === 'lazydesk' && (
-            <div className="space-y-6 max-w-5xl mx-auto">
-              {/* Add Watch Card */}
-              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+            <div className="space-y-6 max-w-6xl mx-auto pb-10">
+              {/* Header and Subtab Navigation */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                 <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-blue-400" />
-                    LazyDesk Folder Monitoring
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Automatically monitor approved folders for dropped files. Events are debounced, loop-protected, and converted to approval plans.
+                  <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-blue-400" />
+                    LazyDesk Automation & Activity
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Real-time file observer with debouncing, loop prevention, and approval-driven organization.
                   </p>
                 </div>
 
-                <form onSubmit={handleAddWatch} className="flex gap-2 pt-2">
-                  <select
-                    value={watchFolderInput}
-                    onChange={(e) => setWatchFolderInput(e.target.value)}
-                    className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                {/* Subtab Segmented Switcher */}
+                <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-800 self-start sm:self-auto">
+                  <button
+                    onClick={() => setLazyDeskSubTab('activity')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition ${
+                      lazyDeskSubTab === 'activity'
+                        ? 'bg-blue-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    }`}
                   >
-                    <option value="">-- Select an approved root to watch --</option>
-                    {systemSettings?.approved_roots.map((r) => (
-                      <option key={r.id} value={r.path}>
-                        {r.label} ({r.path})
-                      </option>
-                    ))}
-                  </select>
+                    <Activity className="w-3.5 h-3.5" />
+                    <span>Activity Timeline</span>
+                    <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-blue-950 text-blue-200 border border-blue-400/30">
+                      {watcherEvents.length}
+                    </span>
+                    {isWatcherPolling && (
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                    )}
+                  </button>
 
                   <button
-                    type="submit"
-                    disabled={!watchFolderInput}
-                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1.5 transition disabled:opacity-50"
+                    onClick={() => setLazyDeskSubTab('monitors')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition ${
+                      lazyDeskSubTab === 'monitors'
+                        ? 'bg-blue-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    }`}
                   >
-                    <FolderPlus className="w-3.5 h-3.5" />
-                    <span>Start Watch</span>
+                    <FolderTree className="w-3.5 h-3.5" />
+                    <span>Folder Monitors</span>
+                    <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-300">
+                      {watches.length}
+                    </span>
                   </button>
-                </form>
-              </div>
-
-              {/* Active Watches List */}
-              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
-                <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-slate-400" />
-                  Configured Folder Monitors ({watches.length})
-                </h4>
-
-                <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden bg-slate-900/40">
-                  {watches.length === 0 ? (
-                    <div className="p-4 text-center text-xs text-slate-500">
-                      No folder watches currently configured. Add one above.
-                    </div>
-                  ) : (
-                    watches.map((w) => (
-                      <div key={w.id} className="p-3.5 flex items-center justify-between text-xs">
-                        <div className="space-y-0.5">
-                          <div className="font-semibold text-white flex items-center gap-2">
-                            <span>{w.folder_path}</span>
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-mono ${w.is_paused ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-400'}`}>
-                              {w.is_paused ? 'PAUSED' : 'ACTIVE'}
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-slate-400 font-mono">
-                            Debounce: {w.debounce_seconds}s • Started: {w.created_at.slice(0, 19).replace('T', ' ')}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => handleToggleWatchPause(w)}
-                            className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:text-white transition"
-                            title={w.is_paused ? 'Resume watch' : 'Pause watch'}
-                          >
-                            {w.is_paused ? <Play className="w-3.5 h-3.5 text-emerald-400" /> : <Pause className="w-3.5 h-3.5 text-amber-400" />}
-                          </button>
-                          <button
-                            onClick={() => handleRemoveWatch(w.id)}
-                            className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:text-rose-400 transition"
-                            title="Remove watch"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
                 </div>
               </div>
+
+              {/* Subtab 1: Activity Timeline */}
+              {lazyDeskSubTab === 'activity' && (
+                <div className="space-y-5">
+                  {/* Notice if no watches are configured */}
+                  {watches.length === 0 && (
+                    <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span>No folders are actively being monitored yet. Add a watched folder to start recording real-time events.</span>
+                      </div>
+                      <button
+                        onClick={() => setLazyDeskSubTab('monitors')}
+                        className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shrink-0 self-start sm:self-auto"
+                      >
+                        <FolderPlus className="w-3.5 h-3.5" />
+                        <span>Configure Monitors</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Activity Toolbar: Live Status, Polling, Refresh, Clear */}
+                  <div className="p-4 rounded-xl border border-slate-800 bg-[#111726]/60 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 flex-wrap">
+                      {/* Live / Paused Status Toggle */}
+                      {isWatcherPolling ? (
+                        <button
+                          onClick={() => setIsWatcherPolling(false)}
+                          className="px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 text-xs font-medium flex items-center gap-2 transition"
+                          title="Click to pause real-time feed updates"
+                        >
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="font-semibold">LIVE</span>
+                          <span className="text-[10px] text-emerald-400/70 font-mono">(1.5s poll)</span>
+                          <Pause className="w-3 h-3 text-emerald-400 ml-0.5" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setIsWatcherPolling(true)}
+                          className="px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 text-xs font-medium flex items-center gap-2 transition"
+                          title="Click to resume real-time updates"
+                        >
+                          <Play className="w-3 h-3 text-amber-400" />
+                          <span className="font-semibold">PAUSED</span>
+                          <span className="text-[10px] text-amber-400/70">Click to resume</span>
+                        </button>
+                      )}
+
+                      {/* Manual Refresh Button */}
+                      <button
+                        onClick={() => fetchEvents(false)}
+                        disabled={isWatcherFetching}
+                        className="p-1.5 px-2.5 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-xs flex items-center gap-1.5 transition disabled:opacity-50"
+                        title="Manually poll watcher events from backend"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isWatcherFetching ? 'animate-spin text-blue-400' : ''}`} />
+                        <span>{isWatcherFetching ? 'Syncing...' : 'Refresh'}</span>
+                      </button>
+
+                      {/* Buffer Info Badge */}
+                      <span className="text-[11px] text-slate-500 font-mono hidden md:inline">
+                        Ring buffer: {watcherEvents.length} / 1,000 events
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {/* Clear Activity Button */}
+                      <button
+                        onClick={() => setConfirmClearFeedModal(true)}
+                        disabled={watcherEvents.length === 0}
+                        className="px-3 py-1.5 rounded-lg border border-slate-700 hover:border-rose-500/40 bg-slate-800/80 hover:bg-rose-500/10 text-slate-300 hover:text-rose-300 text-xs font-medium flex items-center gap-1.5 transition disabled:opacity-40 disabled:hover:border-slate-700 disabled:hover:text-slate-300"
+                        title="Clear in-memory activity feed"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Clear Feed</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Search and Filters Controls */}
+                  <div className="flex flex-col md:flex-row md:items-center gap-3">
+                    {/* Search Input */}
+                    <div className="relative flex-1 min-w-[240px]">
+                      <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-500" />
+                      <input
+                        type="text"
+                        placeholder="Search events by filename or path..."
+                        value={watcherSearchQuery}
+                        onChange={(e) => setWatcherSearchQuery(e.target.value)}
+                        className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition"
+                      />
+                      {watcherSearchQuery && (
+                        <button
+                          onClick={() => setWatcherSearchQuery('')}
+                          className="absolute right-2.5 top-2.5 text-slate-400 hover:text-white"
+                          title="Clear search"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Watched Folder Filter Dropdown (if multiple watches) */}
+                    {watches.length > 1 && (
+                      <select
+                        value={watcherFolderFilter}
+                        onChange={(e) => setWatcherFolderFilter(e.target.value)}
+                        className="px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition"
+                      >
+                        <option value="all">All Watched Folders ({watches.length})</option>
+                        {watches.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {getFilename(w.folder_path)} ({w.folder_path})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    {/* Event Type Filter Chips */}
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+                      <span className="text-slate-500 text-xs hidden lg:flex items-center gap-1 font-medium mr-1">
+                        <Filter className="w-3.5 h-3.5 text-slate-500" />
+                      </span>
+                      <button
+                        onClick={() => setWatcherEventTypeFilter('all')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap ${
+                          watcherEventTypeFilter === 'all'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-900/80 text-slate-400 hover:text-white border border-slate-800'
+                        }`}
+                      >
+                        <span>All</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-black/30">
+                          {watcherEventCounts.all}
+                        </span>
+                      </button>
+
+                      <button
+                        onClick={() => setWatcherEventTypeFilter('created')}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap ${
+                          watcherEventTypeFilter === 'created'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-900/80 text-emerald-400 hover:bg-slate-800 border border-slate-800'
+                        }`}
+                      >
+                        <FilePlus className="w-3.5 h-3.5" />
+                        <span>Created</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-black/30">
+                          {watcherEventCounts.created}
+                        </span>
+                      </button>
+
+                      <button
+                        onClick={() => setWatcherEventTypeFilter('modified')}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap ${
+                          watcherEventTypeFilter === 'modified'
+                            ? 'bg-amber-600 text-white'
+                            : 'bg-slate-900/80 text-amber-400 hover:bg-slate-800 border border-slate-800'
+                        }`}
+                      >
+                        <FileEdit className="w-3.5 h-3.5" />
+                        <span>Modified</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-black/30">
+                          {watcherEventCounts.modified}
+                        </span>
+                      </button>
+
+                      <button
+                        onClick={() => setWatcherEventTypeFilter('moved')}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap ${
+                          watcherEventTypeFilter === 'moved'
+                            ? 'bg-sky-600 text-white'
+                            : 'bg-slate-900/80 text-sky-400 hover:bg-slate-800 border border-slate-800'
+                        }`}
+                      >
+                        <ArrowRightLeft className="w-3.5 h-3.5" />
+                        <span>Renamed</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-black/30">
+                          {watcherEventCounts.moved}
+                        </span>
+                      </button>
+
+                      <button
+                        onClick={() => setWatcherEventTypeFilter('deleted')}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap ${
+                          watcherEventTypeFilter === 'deleted'
+                            ? 'bg-rose-600 text-white'
+                            : 'bg-slate-900/80 text-rose-400 hover:bg-slate-800 border border-slate-800'
+                        }`}
+                      >
+                        <FileX className="w-3.5 h-3.5" />
+                        <span>Deleted</span>
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-black/30">
+                          {watcherEventCounts.deleted}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Recoverable Error Banner */}
+                  {watcherError && (
+                    <div className="p-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-300 text-xs flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                        <span>Watcher API Error: {watcherError}</span>
+                      </div>
+                      <button
+                        onClick={() => fetchEvents(false)}
+                        className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition shrink-0"
+                      >
+                        Retry Connection
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Initial Loading Skeleton */}
+                  {isWatcherLoading && watcherEvents.length === 0 && (
+                    <div className="space-y-3">
+                      {[1, 2, 3].map((i) => (
+                        <div
+                          key={i}
+                          className="animate-pulse rounded-xl border border-slate-800 bg-[#111726]/40 p-5 space-y-3"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="h-4 w-32 bg-slate-800 rounded"></div>
+                            <div className="h-3 w-24 bg-slate-800 rounded"></div>
+                          </div>
+                          <div className="h-5 w-3/4 bg-slate-800 rounded"></div>
+                          <div className="h-3 w-1/2 bg-slate-800 rounded"></div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Empty States */}
+                  {!isWatcherLoading && filteredWatcherEvents.length === 0 && (
+                    <div className="rounded-xl border border-slate-800 bg-[#111726]/40 p-10 text-center space-y-3">
+                      <div className="w-12 h-12 mx-auto rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400">
+                        <Activity className="w-6 h-6 text-blue-400" />
+                      </div>
+                      {watcherEvents.length === 0 ? (
+                        <>
+                          <h4 className="text-sm font-bold text-white">No File Activity Detected Yet</h4>
+                          <p className="text-xs text-slate-400 max-w-md mx-auto">
+                            Files added, modified, renamed, or deleted within your configured watched folders will appear here in real-time.
+                          </p>
+                          {watches.length === 0 && (
+                            <div className="pt-2">
+                              <button
+                                onClick={() => setLazyDeskSubTab('monitors')}
+                                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium inline-flex items-center gap-1.5 transition"
+                              >
+                                <FolderPlus className="w-3.5 h-3.5" />
+                                <span>Add Watched Folder</span>
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <h4 className="text-sm font-bold text-white">No Matching Events Found</h4>
+                          <p className="text-xs text-slate-400 max-w-md mx-auto">
+                            No recorded events match the selected filters or search query.
+                          </p>
+                          <div className="pt-2">
+                            <button
+                              onClick={() => {
+                                setWatcherEventTypeFilter('all');
+                                setWatcherFolderFilter('all');
+                                setWatcherSearchQuery('');
+                              }}
+                              className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>Reset Filters</span>
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Real-Time Events Feed */}
+                  {filteredWatcherEvents.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+                        <span>Showing {filteredWatcherEvents.length} event(s) • Newest first</span>
+                        <span className="font-mono text-[11px] text-slate-500">Live feed active</span>
+                      </div>
+
+                      {filteredWatcherEvents.map((ev) => {
+                        const badgeInfo = getEventBadge(ev.event_type, ev.is_directory);
+                        const EventIcon = badgeInfo.icon;
+                        const timeInfo = formatLocaleTime(ev.timestamp);
+                        const filename = getFilename(ev.relative_path || ev.path);
+
+                        return (
+                          <div
+                            key={ev.id}
+                            className={`rounded-xl border border-slate-800/90 bg-[#111726]/70 hover:bg-[#111726] p-4 transition-all space-y-2.5 ${badgeInfo.cardBorder}`}
+                          >
+                            {/* Card Header */}
+                            <div className="flex items-center justify-between flex-wrap gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {/* Event Type Pill */}
+                                <span
+                                  className={`px-2.5 py-0.5 rounded-md text-[11px] font-bold border flex items-center gap-1.5 ${badgeInfo.badgeStyle}`}
+                                >
+                                  <EventIcon className="w-3.5 h-3.5" />
+                                  <span>{badgeInfo.label}</span>
+                                </span>
+
+                                {/* Directory Indicator */}
+                                {ev.is_directory && (
+                                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-blue-500/15 text-blue-300 border border-blue-500/30 flex items-center gap-1">
+                                    <Folder className="w-3 h-3" />
+                                    <span>FOLDER</span>
+                                  </span>
+                                )}
+
+                                {/* Watched Folder Origin Identity */}
+                                <span
+                                  className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-slate-800/90 text-slate-300 border border-slate-700/60 truncate max-w-[200px]"
+                                  title={`Watch Root: ${ev.folder_path}`}
+                                >
+                                  📁 {getFilename(ev.folder_path) || 'Watched Root'}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-3">
+                                {/* File Size (when available) */}
+                                {ev.size_bytes !== undefined && ev.size_bytes !== null && (
+                                  <span className="text-[11px] font-mono text-slate-400 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800">
+                                    {formatBytes(ev.size_bytes)}
+                                  </span>
+                                )}
+
+                                {/* Exact Locale Timestamp */}
+                                <div
+                                  className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5"
+                                  title={`Full timestamp: ${timeInfo.full}`}
+                                >
+                                  <Clock className="w-3 h-3 text-slate-500" />
+                                  <span>{timeInfo.time}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Card Body: Paths and Filenames */}
+                            {ev.event_type === 'moved' ? (
+                              <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800/80 space-y-1.5">
+                                <div className="text-[10px] text-slate-400 uppercase font-sans font-semibold">
+                                  Path Transition (Rename / Move):
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+                                  <div className="flex items-center gap-1.5 text-rose-300/90 truncate max-w-full">
+                                    <span className="text-[10px] text-slate-500 uppercase font-sans">From:</span>
+                                    <span className="truncate" title={ev.previous_path || undefined}>
+                                      {ev.previous_relative_path || ev.previous_path || '(unknown)'}
+                                    </span>
+                                  </div>
+                                  <ArrowRight className="w-3.5 h-3.5 text-sky-400 shrink-0 mx-1" />
+                                  <div className="flex items-center gap-1.5 text-emerald-300 font-semibold truncate max-w-full">
+                                    <span className="text-[10px] text-slate-500 uppercase font-sans">To:</span>
+                                    <span className="truncate" title={ev.path}>
+                                      {ev.relative_path || ev.path}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-1">
+                                <div className="font-semibold text-white text-sm font-mono truncate" title={ev.path}>
+                                  {filename}
+                                </div>
+                                <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 truncate">
+                                  <span className="text-[10px] text-slate-500 uppercase font-sans">Relative:</span>
+                                  <span className="text-slate-300 truncate" title={ev.path}>
+                                    {ev.relative_path || ev.path}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Automation / Rule Suggestion Badge (if present) */}
+                            {ev.suggestion && (
+                              <div className="pt-1">
+                                <div className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-300">
+                                  <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                                  <span>
+                                    Action Plan: {ev.suggestion.rule_name || ev.suggestion.action || 'Auto-categorization plan generated'}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Subtab 2: Folder Monitors Configuration */}
+              {lazyDeskSubTab === 'monitors' && (
+                <div className="space-y-6">
+                  {/* Add Watch Card */}
+                  <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                    <div>
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-blue-400" />
+                        Configure Folder Monitoring
+                      </h3>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Automatically monitor approved folders for dropped files. Events are debounced, loop-protected, and converted to approval plans.
+                      </p>
+                    </div>
+
+                    <form onSubmit={handleAddWatch} className="flex gap-2 pt-2">
+                      <select
+                        value={watchFolderInput}
+                        onChange={(e) => setWatchFolderInput(e.target.value)}
+                        className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="">-- Select an approved root to watch --</option>
+                        {systemSettings?.approved_roots.map((r) => (
+                          <option key={r.id} value={r.path}>
+                            {r.label} ({r.path})
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        type="submit"
+                        disabled={!watchFolderInput}
+                        className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1.5 transition disabled:opacity-50"
+                      >
+                        <FolderPlus className="w-3.5 h-3.5" />
+                        <span>Start Watch</span>
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* Active Watches List */}
+                  <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-slate-400" />
+                      Configured Folder Monitors ({watches.length})
+                    </h4>
+
+                    <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden bg-slate-900/40">
+                      {watches.length === 0 ? (
+                        <div className="p-4 text-center text-xs text-slate-500">
+                          No folder watches currently configured. Add one above.
+                        </div>
+                      ) : (
+                        watches.map((w) => (
+                          <div key={w.id} className="p-3.5 flex items-center justify-between text-xs">
+                            <div className="space-y-0.5">
+                              <div className="font-semibold text-white flex items-center gap-2">
+                                <span>{w.folder_path}</span>
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-mono ${w.is_paused ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                                  {w.is_paused ? 'PAUSED' : 'ACTIVE'}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-400 font-mono">
+                                Debounce: {w.debounce_seconds}s • Started: {w.created_at.slice(0, 19).replace('T', ' ')}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => handleToggleWatchPause(w)}
+                                className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:text-white transition"
+                                title={w.is_paused ? 'Resume watch' : 'Pause watch'}
+                              >
+                                {w.is_paused ? <Play className="w-3.5 h-3.5 text-emerald-400" /> : <Pause className="w-3.5 h-3.5 text-amber-400" />}
+                              </button>
+                              <button
+                                onClick={() => handleRemoveWatch(w.id)}
+                                className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:text-rose-400 transition"
+                                title="Remove watch"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Confirmation Modal for Clearing In-Memory Activity Feed */}
+              {confirmClearFeedModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+                  <div className="bg-[#111726] border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+                    <div className="flex items-center gap-3 text-rose-400">
+                      <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
+                        <Trash2 className="w-5 h-5 text-rose-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white">Clear Watcher Activity Feed?</h3>
+                        <p className="text-[11px] text-slate-400">In-Memory Timeline Buffer</p>
+                      </div>
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      This will clear the current in-memory watcher event buffer (up to 1,000 events) for this session.
+                    </p>
+                    <div className="p-3 rounded-lg bg-emerald-950/20 border border-emerald-500/30 text-[11px] text-emerald-300 flex items-start gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="text-emerald-200">Security Guarantee:</strong>
+                        <p className="text-emerald-400/80 mt-0.5">
+                          Permanent SQLite audit logs, pending approvals, and historical task records are stored securely in the database and will <strong>not</strong> be deleted.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmClearFeedModal(false)}
+                        disabled={isClearingFeed}
+                        className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleClearWatcherFeed}
+                        disabled={isClearingFeed}
+                        className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition flex items-center gap-1.5 shadow disabled:opacity-50"
+                      >
+                        {isClearingFeed ? (
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isClearingFeed ? 'Clearing...' : 'Clear Activity Feed'}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

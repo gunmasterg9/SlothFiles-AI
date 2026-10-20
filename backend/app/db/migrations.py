@@ -198,6 +198,107 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             FOREIGN KEY (session_id) REFERENCES copilot_sessions(id) ON DELETE CASCADE
         );
         """
+    ),
+    (
+        2,
+        "organization_rules_and_templates",
+        """
+        -- User-configurable organization rules
+        CREATE TABLE IF NOT EXISTS organization_rules (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            match_extensions TEXT NOT NULL DEFAULT '',
+            match_glob TEXT NOT NULL DEFAULT '',
+            match_regex TEXT NOT NULL DEFAULT '',
+            destination_template TEXT NOT NULL,
+            action_type TEXT NOT NULL DEFAULT 'move',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rules_priority ON organization_rules(priority ASC, created_at ASC);
+        CREATE INDEX IF NOT EXISTS idx_rules_enabled ON organization_rules(is_enabled);
+
+        -- Initial seed organization rules for deterministic categorization
+        INSERT OR IGNORE INTO organization_rules (
+            id, name, description, is_enabled, priority,
+            match_extensions, match_glob, match_regex,
+            destination_template, action_type, created_at, updated_at
+        ) VALUES
+        (
+            'rule-invoices-default',
+            'Invoices & Receipts',
+            'Sorts receipts, billing statements, and invoices into date-stamped folders.',
+            1,
+            10,
+            '.pdf,.png,.jpg,.jpeg,.txt',
+            '*invoice*',
+            '',
+            'Invoices & Receipts/{year}/{month}/{stem}.{extension}',
+            'move',
+            '2026-01-01T00:00:00Z',
+            '2026-01-01T00:00:00Z'
+        ),
+        (
+            'rule-contracts-default',
+            'Contracts & Legal',
+            'Routes agreements, NDAs, and legal filings into legal folders.',
+            1,
+            20,
+            '.pdf,.docx,.txt',
+            '*contract*',
+            '',
+            'Contracts & Legal/{year}/{stem}.{extension}',
+            'move',
+            '2026-01-01T00:00:00Z',
+            '2026-01-01T00:00:00Z'
+        ),
+        (
+            'rule-code-default',
+            'Code & Data Assets',
+            'Organizes scripts, database exports, and source code by extension.',
+            1,
+            30,
+            '.py,.ts,.js,.json,.sql,.csv,.yaml,.yml',
+            '',
+            '',
+            'Code & Data/{extension}/{stem}.{extension}',
+            'move',
+            '2026-01-01T00:00:00Z',
+            '2026-01-01T00:00:00Z'
+        ),
+        (
+            'rule-media-default',
+            'Media & Assets',
+            'Organizes images, vector graphics, and audio recordings.',
+            1,
+            40,
+            '.png,.jpg,.jpeg,.svg,.mp4,.mp3,.wav',
+            '',
+            '',
+            'Media & Assets/{year}/{month}/{stem}.{extension}',
+            'move',
+            '2026-01-01T00:00:00Z',
+            '2026-01-01T00:00:00Z'
+        ),
+        (
+            'rule-archives-default',
+            'Compressed Archives',
+            'Organizes zip and compressed archives by year.',
+            1,
+            50,
+            '.zip,.tar,.gz,.7z,.rar',
+            '',
+            '',
+            'Archives/{year}/{stem}.{extension}',
+            'move',
+            '2026-01-01T00:00:00Z',
+            '2026-01-01T00:00:00Z'
+        );
+        """
     )
 ]
 

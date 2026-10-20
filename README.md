@@ -84,40 +84,63 @@ cd slothpilot-ai
 
 The setup script verifies dependencies, creates `.venv`, installs backend requirements, installs frontend packages, and initializes `.env` without downloading large models silently.
 
-### 2. Launch Services
+### 2. Launching the Application
 
-Start the backend and frontend services on loopback:
+#### Option A: Windows Desktop Experience (Recommended for Windows)
+Double-click `start-desktop.bat` in the project root, or execute:
+
+```powershell
+.\scripts\start-desktop.ps1
+```
+
+- **Standalone Edge Window**: Automatically launches SlothPilot AI in an app-framed Microsoft Edge window (`--app`) without browser tabs or address bar clutter.
+- **Automatic Fallback**: If Edge is not installed or `-ForceBrowser` is specified, launches your default web browser.
+- **Production Asset Serving**: Serves the compiled React SPA directly through FastAPI on loopback (`http://127.0.0.1:8000`), requiring only a single lightweight Python process without needing Node.js in the background.
+- **Attached Mode**: Pass `-Wait` to keep the console attached and press `Q` to shut down automatically:
+  ```powershell
+  .\scripts\start-desktop.ps1 -Wait
+  ```
+- **Development Mode**: Pass `-Dev` to spin up the Vite development server (`http://127.0.0.1:5173`) with Hot Module Replacement (HMR):
+  ```powershell
+  .\scripts\start-desktop.ps1 -Dev
+  ```
+
+#### Option B: Terminal Service Mode
+Start backend and frontend development terminals separately:
 
 ```powershell
 .\scripts\start.ps1
 ```
 
 Once running:
-- **Frontend Dashboard**: [http://127.0.0.1:5173](http://127.0.0.1:5173)
+- **Desktop Application**: Standalone Edge App window on [http://127.0.0.1:8000](http://127.0.0.1:8000) (or port 5173 in `-Dev` mode)
 - **Backend API & Swagger Docs**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **Backend Health Check**: [http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health)
 
 ### 3. Verify System Health & Tests
 
-Run the complete test suite (53 tests) and build verification:
+Run the complete regression suite (**89 tests**) and frontend build:
 
 ```powershell
 .\scripts\verify.ps1
 ```
 
-### 4. Stop Services
+### 4. Clean Shutdown
 
-Safely terminate only the processes started by SlothPilot:
+Safely stop all running SlothPilot processes and clean up PID tracking:
 
 ```powershell
-.\scripts\stop.ps1
+# Double-click stop-desktop.bat, or run:
+.\scripts\stop-desktop.ps1
 ```
+
+> **Note**: Closing the Edge application window does not automatically terminate the background backend process. Always use `stop-desktop.bat` or `.\scripts\stop-desktop.ps1` for a clean shutdown.
 
 ---
 
 ## 🧪 Verified Test Suite
 
-SlothPilot AI includes a comprehensive automated test suite with **53 passing tests** across 12 test modules:
+SlothPilot AI includes a comprehensive automated test suite with **89 passing tests** across 15 test modules:
 
 | Test Module | Coverage | Status |
 |:---|:---|:---:|
@@ -127,16 +150,21 @@ SlothPilot AI includes a comprehensive automated test suite with **53 passing te
 | `test_path_security.py` | Approved roots, traversal blocking, UNC blocking | ✅ Passed |
 | `test_settings_and_audit_api.py`| Settings CRUD, live model discovery, audit log API | ✅ Passed |
 | `test_organizer_and_approvals.py`| Duplicate detection, approval lifecycle, precondition abort, safe undo | ✅ Passed |
+| `test_organization_rules.py` | Configurable rules, regex patterns, collision counters, destination templates | ✅ Passed |
+| `test_watcher_events.py` | Real-time creation, modification debouncing, renames, deletions, loop prevention | ✅ Passed |
 | `test_tasks_and_watcher.py` | Task state machine, cancellation, Watchdog loop prevention | ✅ Passed |
 | `test_inbox.py` | Note & email parsing, obligations, dates, injection safety | ✅ Passed |
 | `test_tradesloth.py` | Clean audit, decimal comparison, markdown report export | ✅ Passed |
 | `test_copilot.py` | Pydantic tool schemas, session lifecycle, deterministic fallback | ✅ Passed |
 | `test_security_hardening.py` | Symlinks, case-insensitivity, collisions, race conditions, offline | ✅ Passed |
+| `test_desktop_launcher.py` | SPA static asset serving, 404 isolation, Edge app flags, safe PID shutdown | ✅ Passed |
+| `test_ollama_service.py` | Model discovery, fallback behavior, structured outputs | ✅ Passed |
 
 ---
 
 ## ⚠️ Limitations & Disclosures
 
+- **Desktop Packaging**: Current desktop mode is a lightweight browser-application wrapper leveraging Microsoft Edge (`--app`) and PowerShell orchestration. A native installer (.msi / InnoSetup) or Electron/Tauri binary is not yet packaged.
 - **Initial Downloads**: Initial installation of Python packages, Node modules, and Ollama models requires an internet connection. Once downloaded, all workflows operate 100% offline.
 - **Hardware Requirements**: Local model inference speed depends on your GPU / CPU capabilities. Recommended candidate: `qwen2.5:7b` (requires ~5GB VRAM or 8GB RAM). Smaller models like `llama3.2:1b` or `smollm2` can be used on lower-spec machines.
 - **Regulatory Disclaimer**: Reports generated by the TradeSloth Document Auditor highlight cross-document variances for human review and do not constitute legal or statutory customs clearance advice.

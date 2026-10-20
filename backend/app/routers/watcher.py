@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, status
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from backend.app.services.folder_watcher import folder_watcher_service
@@ -50,3 +51,31 @@ async def remove_watch(watch_id: str):
             detail=f"Watch not found: {watch_id}"
         )
     return {"status": "ok", "removed_id": watch_id}
+
+
+@router.get("/events")
+async def list_recent_events(
+    watch_id: Optional[str] = Query(default=None, description="Filter by watch ID"),
+    event_type: Optional[str] = Query(default=None, description="Filter by event type: created, modified, moved, deleted"),
+    limit: int = Query(default=100, ge=1, le=1000, description="Max number of events to return"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset")
+):
+    """Retrieve queryable recent file activity feed across monitored folders.
+
+    NOTE: The real-time watcher event feed is held in an in-memory ring buffer (bounded to 1,000 entries)
+    to provide responsive loopback polling without unnecessary SQLite writes.
+    Consequential approved operations are permanently recorded in SQLite audit_logs.
+    """
+    return folder_watcher_service.get_recent_events(
+        watch_id=watch_id,
+        event_type=event_type,
+        limit=limit,
+        offset=offset
+    )
+
+
+@router.post("/events/clear")
+async def clear_recent_events():
+    """Clear the in-memory recent event feed."""
+    folder_watcher_service.clear_events()
+    return {"status": "ok", "message": "Recent event feed cleared."}

@@ -8,6 +8,7 @@ from backend.app.services.ai_service import ollama_service, OllamaError
 from backend.app.services.approval_service import approval_service, compute_file_sha256
 from backend.app.services.document_extractor import document_extractor
 from backend.app.services.path_service import path_service
+from backend.app.services.rules_engine import rules_engine_service
 
 logger = logging.getLogger("slothpilot.organizer")
 
@@ -101,24 +102,34 @@ class FileOrganizerService:
             if is_redundant_duplicate:
                 category = "Duplicates"
                 suggested_name = f"duplicate_{f_name}"
+                target_dir = folder / category
+                target_file = target_dir / suggested_name
                 reason = f"Exact SHA-256 match with '{first_occurrence.name}'"
                 risk = "low"
             else:
-                # Extract text for classification
-                extraction = document_extractor.extract_text(f_path)
-                classification = await cls._classify_file(
-                    file_name=f_name,
-                    text_snippet=extraction.text_content,
-                    use_ai=use_ai
-                )
-                category = classification["category"]
-                suggested_name = classification["suggested_filename"]
-                reason = classification["reason"]
-                risk = "low"
-
-            # Determine target path
-            target_dir = folder / category
-            target_file = target_dir / suggested_name
+                # 1. Deterministic user-configured organization rules (first-match by priority)
+                rule_proposal = rules_engine_service.evaluate_file(f_path, folder)
+                if rule_proposal:
+                    target_file = Path(rule_proposal["target_path"])
+                    target_dir = target_file.parent
+                    suggested_name = target_file.name
+                    category = rule_proposal["rule_name"]
+                    reason = rule_proposal["reason"]
+                    risk = "low"
+                else:
+                    # 2. Fall back to local AI or keyword categorization if no user rule matched
+                    extraction = document_extractor.extract_text(f_path)
+                    classification = await cls._classify_file(
+                        file_name=f_name,
+                        text_snippet=extraction.text_content,
+                        use_ai=use_ai
+                    )
+                    category = classification["category"]
+                    suggested_name = classification["suggested_filename"]
+                    target_dir = folder / category
+                    target_file = target_dir / suggested_name
+                    reason = classification["reason"]
+                    risk = "low"
 
             # Collision prevention: if target exists or is already assigned, add counter
             counter = 1

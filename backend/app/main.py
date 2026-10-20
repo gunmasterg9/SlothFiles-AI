@@ -127,3 +127,28 @@ app.include_router(watcher.router)
 app.include_router(inbox.router)
 app.include_router(tradesloth.router)
 app.include_router(copilot.router)
+
+# Mount production frontend assets if built
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+frontend_dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if (frontend_dist_dir / "index.html").exists():
+    assets_dir = frontend_dist_dir / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend_spa(full_path: str):
+        if full_path.startswith("api/") or full_path == "api":
+            raise StarletteHTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+        candidate = frontend_dist_dir / full_path
+        try:
+            resolved_candidate = candidate.resolve()
+            if resolved_candidate.is_relative_to(frontend_dist_dir.resolve()) and resolved_candidate.is_file():
+                return FileResponse(str(resolved_candidate))
+        except (ValueError, RuntimeError):
+            pass
+        return FileResponse(str(frontend_dist_dir / "index.html"))
+
