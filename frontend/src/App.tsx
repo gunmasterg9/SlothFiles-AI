@@ -24,7 +24,14 @@ import {
   X,
   ChevronRight,
   Pause,
-  StopCircle
+  StopCircle,
+  Mail,
+  FileText,
+  Calendar,
+  ListChecks,
+  MessageSquare,
+  Copy,
+  Search
 } from 'lucide-react';
 import {
   fetchHealth,
@@ -47,6 +54,9 @@ import {
   removeWatch,
   fetchTasks,
   cancelTask,
+  importInboxFile,
+  fetchInboxItems,
+  analyzeInboxItem,
   type HealthResponse,
   type ReadinessResponse,
   type SystemSettings,
@@ -55,7 +65,8 @@ import {
   type ActionPlan,
   type ScanResult,
   type FolderWatch,
-  type TaskRecord
+  type TaskRecord,
+  type InboxItem
 } from './services/api';
 
 type Tab =
@@ -100,11 +111,21 @@ export default function App() {
   // LazyDesk form states
   const [watchFolderInput, setWatchFolderInput] = useState<string>('');
 
+  // Inbox & Notes states
+  const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
+  const [selectedInboxItem, setSelectedInboxItem] = useState<InboxItem | null>(null);
+  const [inboxSearchQuery, setInboxSearchQuery] = useState<string>('');
+  const [inboxImportPath, setInboxImportPath] = useState<string>('');
+  const [inboxImportTitle, setInboxImportTitle] = useState<string>('');
+  const [isImportingInbox, setIsImportingInbox] = useState<boolean>(false);
+  const [isAnalyzingInbox, setIsAnalyzingInbox] = useState<boolean>(false);
+  const [copiedDraft, setCopiedDraft] = useState<boolean>(false);
+
   const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
-      const [h, r, s, m, a, p, w, t] = await Promise.all([
+      const [h, r, s, m, a, p, w, t, inb] = await Promise.all([
         fetchHealth().catch(() => null),
         fetchReadiness().catch(() => null),
         fetchSettings().catch(() => null),
@@ -112,7 +133,8 @@ export default function App() {
         fetchAuditLogs(undefined, 10, 0).catch(() => ({ total: 0, items: [] })),
         fetchPendingApprovals().catch(() => []),
         fetchWatches().catch(() => []),
-        fetchTasks(undefined, 20).catch(() => [])
+        fetchTasks(undefined, 20).catch(() => []),
+        fetchInboxItems(inboxSearchQuery || undefined).catch(() => [])
       ]);
 
       if (h) setHealth(h);
@@ -132,11 +154,62 @@ export default function App() {
       if (p) setPendingPlans(p);
       if (w) setWatches(w);
       if (t) setTasks(t);
+      if (inb) {
+        setInboxItems(inb);
+        setSelectedInboxItem((prev) => {
+          if (!prev && inb.length > 0) return inb[0];
+          if (prev) {
+            const found = inb.find((x) => x.id === prev.id);
+            return found || (inb.length > 0 ? inb[0] : null);
+          }
+          return null;
+        });
+      }
     } catch (err: any) {
       setError(err.message || 'Error communicating with backend service.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleImportInbox = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inboxImportPath.trim()) return;
+    try {
+      setIsImportingInbox(true);
+      setActionNotice('Importing and hashing local document...');
+      const item = await importInboxFile(inboxImportPath.trim(), inboxImportTitle.trim() || undefined);
+      setActionNotice(`Imported '${item.title}' successfully.`);
+      setInboxImportPath('');
+      setInboxImportTitle('');
+      setSelectedInboxItem(item);
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Import failed: ${err.message}`);
+    } finally {
+      setIsImportingInbox(false);
+    }
+  };
+
+  const handleAnalyzeInbox = async (itemId: string) => {
+    try {
+      setIsAnalyzingInbox(true);
+      setActionNotice('Running local AI analysis: generating summary, extracting obligations and date evidence...');
+      const updated = await analyzeInboxItem(itemId, true);
+      setSelectedInboxItem(updated);
+      setActionNotice(`Analysis complete for '${updated.title}'.`);
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Analysis error: ${err.message}`);
+    } finally {
+      setIsAnalyzingInbox(false);
+    }
+  };
+
+  const handleCopyDraft = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedDraft(true);
+    setTimeout(() => setCopiedDraft(false), 2000);
   };
 
   useEffect(() => {
@@ -288,7 +361,7 @@ export default function App() {
     { id: 'overview', label: 'Overview', icon: Activity },
     { id: 'organizer', label: 'File Organizer', icon: FolderTree },
     { id: 'lazydesk', label: 'LazyDesk Automation', icon: Clock, badge: watches.filter(w => !w.is_paused).length },
-    { id: 'inbox', label: 'Inbox & Notes', icon: Inbox },
+    { id: 'inbox', label: 'Inbox & Notes', icon: Inbox, badge: inboxItems.length },
     { id: 'tradesloth', label: 'TradeSloth Auditor', icon: Scale },
     { id: 'copilot', label: 'Local Copilot', icon: Bot },
     { id: 'approvals', label: 'Approvals', icon: CheckCircle2, badge: pendingPlans.length },
@@ -821,6 +894,352 @@ export default function App() {
                         </div>
                       </div>
                     ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'inbox' && (
+            <div className="space-y-6 max-w-6xl mx-auto">
+              {/* Header and Import Section */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Inbox className="w-4 h-4 text-purple-400" />
+                      Local Inbox & Notes Assistant
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Import Markdown notes or EML email files for offline summarization, date tracking, and obligation extraction. All replies are stored locally; external network calls are forbidden.
+                    </p>
+                  </div>
+                  <span className="px-2.5 py-1 rounded text-xs font-mono bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                    Offline Extraction
+                  </span>
+                </div>
+
+                {/* Import Form */}
+                <form onSubmit={handleImportInbox} className="flex flex-col sm:flex-row gap-2 pt-2">
+                  <input
+                    type="text"
+                    placeholder="Full path to .txt, .md, or .eml file within approved roots"
+                    value={inboxImportPath}
+                    onChange={(e) => setInboxImportPath(e.target.value)}
+                    className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Custom title (optional)"
+                    value={inboxImportTitle}
+                    onChange={(e) => setInboxImportTitle(e.target.value)}
+                    className="sm:w-56 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isImportingInbox || !inboxImportPath}
+                    className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                  >
+                    {isImportingInbox ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FolderPlus className="w-3.5 h-3.5" />}
+                    <span>{isImportingInbox ? 'Importing...' : 'Import Document'}</span>
+                  </button>
+                </form>
+              </div>
+
+              {/* Two-Column Explorer */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Left: Document List & Search */}
+                <div className="lg:col-span-4 rounded-xl border border-slate-800 bg-[#111726]/60 p-4 space-y-3">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      placeholder="Search title or text..."
+                      value={inboxSearchQuery}
+                      onChange={(e) => setInboxSearchQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') loadData();
+                      }}
+                      className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                    />
+                  </div>
+
+                  <div className="text-[11px] font-medium text-slate-400 flex items-center justify-between px-1">
+                    <span>Imported Items ({inboxItems.length})</span>
+                    <button
+                      onClick={loadData}
+                      className="text-slate-400 hover:text-white flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3 h-3" /> Refresh
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+                    {inboxItems.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-slate-500 border border-slate-800/80 rounded-lg">
+                        No notes or emails imported yet. Provide a path above to import.
+                      </div>
+                    ) : (
+                      inboxItems.map((item) => {
+                        const isSelected = selectedInboxItem?.id === item.id;
+                        return (
+                          <div
+                            key={item.id}
+                            onClick={() => setSelectedInboxItem(item)}
+                            className={`p-3 rounded-lg border text-xs cursor-pointer transition ${
+                              isSelected
+                                ? 'bg-purple-950/20 border-purple-500/50 shadow-sm'
+                                : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold flex items-center gap-1 ${
+                                  item.source_type === 'email'
+                                    ? 'bg-blue-500/20 text-blue-300'
+                                    : 'bg-emerald-500/20 text-emerald-300'
+                                }`}
+                              >
+                                {item.source_type === 'email' ? <Mail className="w-2.5 h-2.5" /> : <FileText className="w-2.5 h-2.5" />}
+                                {item.source_type.toUpperCase()}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                {item.created_at.slice(5, 10)}
+                              </span>
+                            </div>
+
+                            <div className="font-semibold text-white truncate" title={item.title}>
+                              {item.title}
+                            </div>
+
+                            <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">
+                              {item.summary || item.extracted_text.slice(0, 100) || 'No text extracted.'}
+                            </p>
+
+                            {item.metadata?.is_duplicate && (
+                              <span className="inline-block mt-1.5 px-1.5 py-0.2 rounded text-[9px] font-mono bg-amber-500/20 text-amber-300">
+                                Duplicate Detected
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Right: Selected Item Details & Analysis */}
+                <div className="lg:col-span-8 space-y-4">
+                  {!selectedInboxItem ? (
+                    <div className="rounded-xl border border-slate-800 bg-[#111726]/40 p-12 text-center text-slate-400">
+                      <Inbox className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                      <h4 className="text-sm font-semibold text-white">No Item Selected</h4>
+                      <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                        Select a document from the left list or import a file above to inspect its summary, action items, dates, and local draft reply.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Document Meta Header */}
+                      <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${
+                                  selectedInboxItem.source_type === 'email'
+                                    ? 'bg-blue-500/20 text-blue-300'
+                                    : 'bg-emerald-500/20 text-emerald-300'
+                                }`}
+                              >
+                                {selectedInboxItem.source_type}
+                              </span>
+                              <span className="text-[11px] font-mono text-slate-500">
+                                SHA256: {selectedInboxItem.file_hash.slice(0, 12)}...
+                              </span>
+                            </div>
+                            <h3 className="text-base font-bold text-white mt-1">
+                              {selectedInboxItem.title}
+                            </h3>
+                            <p className="text-xs text-slate-400 truncate max-w-xl font-mono mt-0.5" title={selectedInboxItem.file_path}>
+                              {selectedInboxItem.file_path}
+                            </p>
+                          </div>
+
+                          <button
+                            onClick={() => handleAnalyzeInbox(selectedInboxItem.id)}
+                            disabled={isAnalyzingInbox}
+                            className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+                          >
+                            {isAnalyzingInbox ? (
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-3.5 h-3.5" />
+                            )}
+                            <span>{isAnalyzingInbox ? 'Analyzing...' : 'Run Local AI Analysis'}</span>
+                          </button>
+                        </div>
+
+                        {/* Summary Block */}
+                        <div className="space-y-1.5">
+                          <h4 className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                            Document Summary
+                          </h4>
+                          <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs text-slate-200 leading-relaxed">
+                            {selectedInboxItem.summary ? (
+                              selectedInboxItem.summary
+                            ) : (
+                              <span className="text-slate-500 italic">
+                                No summary generated yet. Click 'Run Local AI Analysis' above to generate one with Ollama.
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Action Items / Obligations */}
+                      <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <ListChecks className="w-4 h-4 text-amber-400" />
+                            Action Items & Obligations ({selectedInboxItem.action_items?.length || 0})
+                          </h4>
+                          <span className="text-[11px] text-slate-500">Extracted with source quotes</span>
+                        </div>
+
+                        {(!selectedInboxItem.action_items || selectedInboxItem.action_items.length === 0) ? (
+                          <div className="p-3 rounded-lg bg-slate-900/40 border border-slate-800 text-xs text-slate-500">
+                            No action items detected or analysis has not been run.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {selectedInboxItem.action_items.map((act, idx) => (
+                              <div
+                                key={idx}
+                                className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs space-y-1.5"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="font-semibold text-white">{act.description}</span>
+                                  <div className="flex items-center gap-1.5">
+                                    {act.assignee && (
+                                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300">
+                                        @{act.assignee}
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono uppercase ${
+                                        act.urgency === 'high'
+                                          ? 'bg-rose-500/20 text-rose-300'
+                                          : act.urgency === 'medium'
+                                          ? 'bg-amber-500/20 text-amber-300'
+                                          : 'bg-blue-500/20 text-blue-300'
+                                      }`}
+                                    >
+                                      {act.urgency}
+                                    </span>
+                                  </div>
+                                </div>
+                                {act.source_quote && (
+                                  <p className="text-[11px] text-slate-400 italic bg-slate-950/60 p-2 rounded border border-slate-800/60">
+                                    “{act.source_quote}”
+                                  </p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Dates and Commitments */}
+                      <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <Calendar className="w-4 h-4 text-blue-400" />
+                            Key Dates & Deadlines ({selectedInboxItem.key_dates?.length || 0})
+                          </h4>
+                          <span className="text-[11px] text-slate-500">With ambiguity detection</span>
+                        </div>
+
+                        {(!selectedInboxItem.key_dates || selectedInboxItem.key_dates.length === 0) ? (
+                          <div className="p-3 rounded-lg bg-slate-900/40 border border-slate-800 text-xs text-slate-500">
+                            No dates identified or analysis has not been run.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {selectedInboxItem.key_dates.map((dateObj, idx) => (
+                              <div
+                                key={idx}
+                                className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs space-y-1.5"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono font-semibold text-emerald-400">
+                                      {dateObj.normalized_date || dateObj.date_text}
+                                    </span>
+                                    {dateObj.is_ambiguous && (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-amber-500/20 text-amber-300 flex items-center gap-1">
+                                        <AlertTriangle className="w-2.5 h-2.5" /> Ambiguous Date
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-[11px] text-slate-400">{dateObj.context}</span>
+                                </div>
+                                {dateObj.source_quote && (
+                                  <p className="text-[11px] text-slate-400 italic bg-slate-950/60 p-2 rounded border border-slate-800/60">
+                                    “{dateObj.source_quote}”
+                                  </p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Local Draft Reply */}
+                      <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <MessageSquare className="w-4 h-4 text-purple-400" />
+                            Local Response Draft
+                          </h4>
+                          <span className="text-[11px] text-emerald-400">
+                            Stored locally • No email will be sent
+                          </span>
+                        </div>
+
+                        <div className="p-3.5 rounded-lg bg-slate-900/90 border border-slate-800 text-xs text-slate-200 whitespace-pre-wrap leading-relaxed relative">
+                          {selectedInboxItem.draft_reply ? (
+                            <>
+                              <div className="mb-2 flex justify-end">
+                                <button
+                                  onClick={() => handleCopyDraft(selectedInboxItem.draft_reply!)}
+                                  className="px-2.5 py-1 rounded border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] flex items-center gap-1 transition"
+                                >
+                                  {copiedDraft ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                                  <span>{copiedDraft ? 'Copied' : 'Copy Draft'}</span>
+                                </button>
+                              </div>
+                              {selectedInboxItem.draft_reply}
+                            </>
+                          ) : (
+                            <span className="text-slate-500 italic">
+                              No reply draft generated yet. Click 'Run Local AI Analysis' to generate a response draft.
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Extracted Text Viewer */}
+                      <details className="rounded-xl border border-slate-800 bg-[#111726]/40 p-4 text-xs">
+                        <summary className="font-semibold text-slate-400 cursor-pointer hover:text-white select-none">
+                          Inspect Raw Extracted Content ({selectedInboxItem.extracted_text.length} chars)
+                        </summary>
+                        <div className="mt-3 p-3 rounded-lg bg-slate-950 font-mono text-[11px] text-slate-300 max-h-64 overflow-y-auto whitespace-pre-wrap border border-slate-900">
+                          {selectedInboxItem.extracted_text}
+                        </div>
+                      </details>
+                    </div>
                   )}
                 </div>
               </div>

@@ -108,6 +108,36 @@ export interface TaskRecord {
   metadata: Record<string, any>;
 }
 
+export interface ActionObligation {
+  description: string;
+  assignee: string | null;
+  urgency: string;
+  source_quote: string;
+}
+
+export interface DateEvidence {
+  date_text: string;
+  normalized_date: string | null;
+  is_ambiguous: boolean;
+  context: string;
+  source_quote: string;
+}
+
+export interface InboxItem {
+  id: string;
+  title: string;
+  source_type: 'note' | 'email';
+  file_path: string;
+  file_hash: string;
+  extracted_text: string;
+  summary: string | null;
+  draft_reply: string | null;
+  action_items?: ActionObligation[];
+  key_dates?: DateEvidence[];
+  created_at: string;
+  metadata: Record<string, any>;
+}
+
 export interface AuditLogEntry {
   id: number;
   timestamp: string;
@@ -305,5 +335,45 @@ export async function fetchTasks(status?: string, limit: number = 50): Promise<T
 export async function cancelTask(taskId: string): Promise<TaskRecord> {
   const res = await fetch(`${API_BASE}/tasks/${taskId}/cancel`, { method: 'POST' });
   if (!res.ok) throw new Error(`Cancel task failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function importInboxFile(file_path: string, title?: string): Promise<InboxItem> {
+  const res = await fetch(`${API_BASE}/inbox/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_path, title })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Failed to import inbox file.');
+  }
+  return res.json();
+}
+
+export async function fetchInboxItems(query?: string): Promise<InboxItem[]> {
+  const url = new URL(`${window.location.origin}${API_BASE}/inbox/items`);
+  if (query) url.searchParams.set('query', query);
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`Fetch inbox items failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchInboxItem(itemId: string): Promise<InboxItem> {
+  const res = await fetch(`${API_BASE}/inbox/items/${itemId}`);
+  if (!res.ok) throw new Error(`Fetch inbox item failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function analyzeInboxItem(itemId: string, use_ai: boolean = true): Promise<InboxItem> {
+  const res = await fetch(`${API_BASE}/inbox/items/${itemId}/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ use_ai })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Failed to analyze inbox item.');
+  }
   return res.json();
 }

@@ -144,7 +144,15 @@ slothpilot-ai/
 
 ### Milestone M5: Inbox & Notes Assistant
 - **Goal:** Import validation (TXT, MD, EML), local metadata/text storage, summary generation, action-item extraction, date extraction with source quotes, local reply drafting (no network send), search/filtering.
-- **Verification:** Test EML/TXT parser with synthetic emails; verify source citation for dates/action items; verify prompt injection resistance (untrusted document instructions cannot override safety policies).
+- **Verification:**
+  - Pytest suite: 36 tests passing (`test_inbox.py`, etc.).
+  - Note and EML import verified: SHA-256 duplicate detection, file size validation, RFC 5322 header parsing.
+  - Action item extraction verified: descriptions, assignees, urgency levels, and mandatory source quote citations.
+  - Date extraction verified: normalized dates, ambiguity flags (detecting relative dates like "next Thursday"), and context citations.
+  - Local draft reply generation verified: generated replies remain strictly local; zero network calls or external email accounts.
+  - Adversarial prompt injection safety verified: document instructions cannot override system security constraints or execute tools.
+  - Frontend production build: compiled in 2.61s with search, import picker, action items list, date evidence viewer, and local reply draft copying.
+- **Status:** Completed.
 
 ### Milestone M6: TradeSloth Document Auditor
 - **Goal:** Multi-document shipment auditor (PDF, DOCX, XLSX, TXT), candidate field extraction (invoice numbers, currency, descriptions, quantities, weights, package counts, totals), decimal arithmetic comparison, tolerance handling, discrepancy matrix (missing, unreadable, inconsistent, verified), printable/exportable audit report.
