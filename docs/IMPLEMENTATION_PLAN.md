@@ -195,7 +195,22 @@ slothpilot-ai/
 
 ### Milestone M9: Documentation, Demonstration & Hacktoberfest Submission
 - **Goal:** Operational PowerShell scripts (`setup.ps1`, `start.ps1`, `stop.ps1`, `verify.ps1`), `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, `docs/TESTING.md`, `docs/DEMO.md`, `README.md`, `LICENSE`, `CONTRIBUTING.md`, and DEV.to article draft.
-- **Verification:** `scripts/verify.ps1` runs end-to-end and exits code 0; browser walkthrough recorded.
+- **Verification:**
+  - Operational scripts verified:
+    - `scripts/setup.ps1`: Automated dependency checker, virtual environment creator, and dependency installer.
+    - `scripts/start.ps1`: Background service launcher with loopback binding, PID recording to `.slothpilot.pids`, log capturing, and health confirmation.
+    - `scripts/stop.ps1`: Targeted process terminator based strictly on recorded PIDs; leaves unrelated user processes untouched.
+    - `scripts/verify.ps1`: End-to-end regression test runner; executes all 53 backend tests, frontend Vite production build, and database migration checks, returning exit code 0.
+  - Complete documentation suite authored:
+    - `README.md`: Comprehensive project overview, 5 modules, installation guide, quick start, architecture, test matrix, and limitations disclosures.
+    - `LICENSE`: Open-source MIT License.
+    - `CONTRIBUTING.md`: Development guidelines, code standards, security rules, and Hacktoberfest instructions.
+    - `docs/ARCHITECTURE.md`: Detailed component architecture, data flow diagrams, shared core services, database schema, and loopback networking.
+    - `docs/SECURITY.md`: Comprehensive threat model, approved root isolation, TOCTOU defense, append-only triggers, and DNS rebinding protections.
+    - `docs/TESTING.md`: Complete testing guide, 12 test files breakdown, execution commands, and 17 acceptance criteria verification.
+    - `docs/DEMO.md`: Step-by-step walkthrough across all five modules from root approval to copilot chat.
+    - `docs/HACKTOBERFEST_ARTICLE.md`: Factual DEV.to article titled *"SlothPilot AI: Let Open-Source AI Handle the Busywork, Locally"*.
+- **Status:** Completed.
 
 ---
 
