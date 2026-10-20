@@ -133,7 +133,14 @@ slothpilot-ai/
 
 ### Milestone M4: LazyDesk Automation
 - **Goal:** Watchdog folder monitoring restricted to approved roots, pause/resume, persistent queue, file-change deduplication, event loop prevention (ignoring internal moves/temp files), retry limits with backoff, task history.
-- **Verification:** Watchdog integration test: dropping file in watched test folder triggers queued plan; self-modification does not loop; pause stops processing; resume restarts.
+- **Verification:**
+  - Pytest suite: 32 tests passing (`test_tasks_and_watcher.py`, etc.).
+  - Shared task lifecycle tested: strictly enforces validated state machine (`queued -> running -> succeeded/failed/cancelled`), rejects invalid transitions with 400 Bad Request, records events and audits.
+  - Watchdog integration tested: file drops in monitored approved folders trigger debounced background tasks.
+  - Event loop prevention verified: internal file reorganizations, category directories, and `.tmp` files are ignored and do NOT trigger task loops.
+  - Cooperative pause, resume, and cancellation verified.
+  - Frontend production build: compiled in 2.00s with LazyDesk monitor management, active watches table, and Task history lifecycle viewer.
+- **Status:** Completed.
 
 ### Milestone M5: Inbox & Notes Assistant
 - **Goal:** Import validation (TXT, MD, EML), local metadata/text storage, summary generation, action-item extraction, date extraction with source quotes, local reply drafting (no network send), search/filtering.

@@ -8,7 +8,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.config import settings
 from backend.app.db.migrations import run_migrations
-from backend.app.routers import health, settings as settings_router, audit, organizer, approvals
+from backend.app.routers import health, settings as settings_router, audit, organizer, approvals, tasks, watcher
+from backend.app.services.folder_watcher import folder_watcher_service
 
 # Setup logging
 logging.basicConfig(
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     settings.resolved_data_dir.mkdir(parents=True, exist_ok=True)
     run_migrations()
     yield
+    folder_watcher_service.shutdown()
     logger.info("Shutting down SlothPilot AI backend.")
 
 
@@ -120,3 +122,5 @@ app.include_router(settings_router.router)
 app.include_router(audit.router)
 app.include_router(organizer.router)
 app.include_router(approvals.router)
+app.include_router(tasks.router)
+app.include_router(watcher.router)

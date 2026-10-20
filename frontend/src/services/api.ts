@@ -86,6 +86,28 @@ export interface ScanResult {
   message?: string;
 }
 
+export interface FolderWatch {
+  id: string;
+  folder_path: string;
+  is_paused: number;
+  recursive: number;
+  debounce_seconds: number;
+  last_scan_at: string | null;
+  created_at: string;
+}
+
+export interface TaskRecord {
+  id: string;
+  task_type: string;
+  status: 'queued' | 'running' | 'awaiting_approval' | 'succeeded' | 'failed' | 'cancelled';
+  progress: number;
+  message: string;
+  created_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+  metadata: Record<string, any>;
+}
+
 export interface AuditLogEntry {
   id: number;
   timestamp: string;
@@ -231,5 +253,57 @@ export async function undoPlan(planId: string): Promise<ActionPlan> {
     const data = await res.json().catch(() => ({}));
     throw new Error(data?.error?.message || data?.detail || 'Undo failed.');
   }
+  return res.json();
+}
+
+export async function fetchWatches(): Promise<FolderWatch[]> {
+  const res = await fetch(`${API_BASE}/watcher/watches`);
+  if (!res.ok) throw new Error(`Fetch folder watches failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function addWatch(folder_path: string, recursive: boolean = false, debounce_seconds: number = 2.0): Promise<FolderWatch> {
+  const res = await fetch(`${API_BASE}/watcher/watches`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder_path, recursive, debounce_seconds })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error?.message || data?.detail || 'Failed to start folder watch.');
+  }
+  return res.json();
+}
+
+export async function pauseWatch(watchId: string): Promise<any> {
+  const res = await fetch(`${API_BASE}/watcher/watches/${watchId}/pause`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Pause failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function resumeWatch(watchId: string): Promise<any> {
+  const res = await fetch(`${API_BASE}/watcher/watches/${watchId}/resume`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Resume failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function removeWatch(watchId: string): Promise<any> {
+  const res = await fetch(`${API_BASE}/watcher/watches/${watchId}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Remove watch failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTasks(status?: string, limit: number = 50): Promise<TaskRecord[]> {
+  const url = new URL(`${window.location.origin}${API_BASE}/tasks`);
+  if (status) url.searchParams.set('status', status);
+  url.searchParams.set('limit', limit.toString());
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`Fetch tasks failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function cancelTask(taskId: string): Promise<TaskRecord> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/cancel`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Cancel task failed: HTTP ${res.status}`);
   return res.json();
 }

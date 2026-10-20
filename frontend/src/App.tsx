@@ -22,7 +22,9 @@ import {
   Play,
   RotateCcw,
   X,
-  ChevronRight
+  ChevronRight,
+  Pause,
+  StopCircle
 } from 'lucide-react';
 import {
   fetchHealth,
@@ -38,13 +40,22 @@ import {
   approvePlan,
   rejectPlan,
   undoPlan,
+  fetchWatches,
+  addWatch,
+  pauseWatch,
+  resumeWatch,
+  removeWatch,
+  fetchTasks,
+  cancelTask,
   type HealthResponse,
   type ReadinessResponse,
   type SystemSettings,
   type ModelsResponse,
   type AuditLogEntry,
   type ActionPlan,
-  type ScanResult
+  type ScanResult,
+  type FolderWatch,
+  type TaskRecord
 } from './services/api';
 
 type Tab =
@@ -68,13 +79,17 @@ export default function App() {
   const [totalAuditLogs, setTotalAuditLogs] = useState<number>(0);
   const [pendingPlans, setPendingPlans] = useState<ActionPlan[]>([]);
   const [completedPlans, setCompletedPlans] = useState<ActionPlan[]>([]);
+  const [watches, setWatches] = useState<FolderWatch[]>([]);
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Notice banner
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   // Settings form states
   const [newRootPath, setNewRootPath] = useState<string>('');
   const [newRootLabel, setNewRootLabel] = useState<string>('');
-  const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   // Organizer scan states
   const [scanFolderInput, setScanFolderInput] = useState<string>('');
@@ -82,17 +97,22 @@ export default function App() {
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [latestScanResult, setLatestScanResult] = useState<ScanResult | null>(null);
 
+  // LazyDesk form states
+  const [watchFolderInput, setWatchFolderInput] = useState<string>('');
+
   const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
-      const [h, r, s, m, a, p] = await Promise.all([
+      const [h, r, s, m, a, p, w, t] = await Promise.all([
         fetchHealth().catch(() => null),
         fetchReadiness().catch(() => null),
         fetchSettings().catch(() => null),
         fetchModels().catch(() => null),
         fetchAuditLogs(undefined, 10, 0).catch(() => ({ total: 0, items: [] })),
-        fetchPendingApprovals().catch(() => [])
+        fetchPendingApprovals().catch(() => []),
+        fetchWatches().catch(() => []),
+        fetchTasks(undefined, 20).catch(() => [])
       ]);
 
       if (h) setHealth(h);
@@ -101,6 +121,7 @@ export default function App() {
         setSystemSettings(s);
         if (!scanFolderInput && s.approved_roots.length > 0) {
           setScanFolderInput(s.approved_roots[0].path);
+          setWatchFolderInput(s.approved_roots[0].path);
         }
       }
       if (m) setModelsData(m);
@@ -109,6 +130,8 @@ export default function App() {
         setTotalAuditLogs(a.total);
       }
       if (p) setPendingPlans(p);
+      if (w) setWatches(w);
+      if (t) setTasks(t);
     } catch (err: any) {
       setError(err.message || 'Error communicating with backend service.');
     } finally {
@@ -118,24 +141,19 @@ export default function App() {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 15000);
+    const interval = setInterval(loadData, 10000);
     return () => clearInterval(interval);
   }, []);
 
   const handleScan = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!scanFolderInput.trim()) {
-      setActionNotice('Please select or enter an approved folder path to scan.');
-      return;
-    }
+    if (!scanFolderInput.trim()) return;
     try {
       setIsScanning(true);
       setActionNotice('Scanning files and computing SHA-256 hashes...');
       const res = await scanFolder(scanFolderInput.trim(), useAiClassification);
       setLatestScanResult(res);
-      setActionNotice(
-        `Scan complete: ${res.total_files} files analyzed, ${res.duplicates_found} duplicates found.`
-      );
+      setActionNotice(`Scan complete: ${res.total_files} files analyzed, ${res.duplicates_found} duplicates found.`);
       await loadData();
     } catch (err: any) {
       setActionNotice(`Scan failed: ${err.message}`);
@@ -146,9 +164,9 @@ export default function App() {
 
   const handleApprovePlan = async (planId: string) => {
     try {
-      setActionNotice('Revalidating preconditions and executing safe file operations...');
+      setActionNotice('Revalidating preconditions and executing file moves...');
       const updated = await approvePlan(planId);
-      setActionNotice(`Plan '${updated.title}' executed successfully. ${updated.items.length} files moved.`);
+      setActionNotice(`Plan '${updated.title}' executed successfully.`);
       setCompletedPlans((prev) => [updated, ...prev.filter((p) => p.id !== updated.id)]);
       await loadData();
     } catch (err: any) {
@@ -175,6 +193,54 @@ export default function App() {
       await loadData();
     } catch (err: any) {
       setActionNotice(`Undo failed: ${err.message}`);
+    }
+  };
+
+  const handleAddWatch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!watchFolderInput.trim()) return;
+    try {
+      setActionNotice('Starting folder monitor...');
+      await addWatch(watchFolderInput.trim());
+      setActionNotice(`Started LazyDesk monitoring on ${watchFolderInput}`);
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Failed to add watch: ${err.message}`);
+    }
+  };
+
+  const handleToggleWatchPause = async (watch: FolderWatch) => {
+    try {
+      if (watch.is_paused) {
+        await resumeWatch(watch.id);
+        setActionNotice(`Resumed monitoring ${watch.folder_path}`);
+      } else {
+        await pauseWatch(watch.id);
+        setActionNotice(`Paused monitoring ${watch.folder_path}`);
+      }
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Error: ${err.message}`);
+    }
+  };
+
+  const handleRemoveWatch = async (watchId: string) => {
+    try {
+      await removeWatch(watchId);
+      setActionNotice('Folder watch removed.');
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Error: ${err.message}`);
+    }
+  };
+
+  const handleCancelTask = async (taskId: string) => {
+    try {
+      await cancelTask(taskId);
+      setActionNotice(`Task ${taskId.slice(0, 8)} cancelled.`);
+      await loadData();
+    } catch (err: any) {
+      setActionNotice(`Cancel error: ${err.message}`);
     }
   };
 
@@ -221,7 +287,7 @@ export default function App() {
   const navItems = [
     { id: 'overview', label: 'Overview', icon: Activity },
     { id: 'organizer', label: 'File Organizer', icon: FolderTree },
-    { id: 'lazydesk', label: 'LazyDesk Automation', icon: Clock },
+    { id: 'lazydesk', label: 'LazyDesk Automation', icon: Clock, badge: watches.filter(w => !w.is_paused).length },
     { id: 'inbox', label: 'Inbox & Notes', icon: Inbox },
     { id: 'tradesloth', label: 'TradeSloth Auditor', icon: Scale },
     { id: 'copilot', label: 'Local Copilot', icon: Bot },
@@ -325,7 +391,7 @@ export default function App() {
             <button
               onClick={loadData}
               disabled={loading}
-              title="Refresh health checks and data"
+              title="Refresh data"
               className="p-1.5 rounded-lg border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700 transition"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -409,14 +475,14 @@ export default function App() {
 
                 <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
                   <div className="flex items-center justify-between text-slate-400 text-xs mb-2">
-                    <span>Approved Roots</span>
-                    <FolderTree className="w-4 h-4 text-blue-400" />
+                    <span>Active Folder Watches</span>
+                    <Clock className="w-4 h-4 text-blue-400" />
                   </div>
                   <div className="text-base font-bold text-white">
-                    {systemSettings?.approved_roots.length || 0} Folders
+                    {watches.filter((w) => !w.is_paused).length} Active ({watches.length} Total)
                   </div>
                   <p className="text-[11px] text-slate-500 mt-1">
-                    Restricted filesystem boundaries
+                    LazyDesk real-time monitoring
                   </p>
                 </div>
 
@@ -425,9 +491,7 @@ export default function App() {
                     <span>Audit Logs</span>
                     <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   </div>
-                  <div className="text-base font-bold text-white">
-                    {totalAuditLogs} Records
-                  </div>
+                  <div className="text-base font-bold text-white">{totalAuditLogs} Records</div>
                   <p className="text-[11px] text-slate-500 mt-1">
                     Immutable append-only trail
                   </p>
@@ -537,7 +601,6 @@ export default function App() {
 
           {activeTab === 'organizer' && (
             <div className="space-y-6 max-w-5xl mx-auto">
-              {/* Scan Configuration Card */}
               <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
                 <div>
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -589,7 +652,6 @@ export default function App() {
                 </form>
               </div>
 
-              {/* Latest Scan Results / Plan Preview */}
               {latestScanResult && latestScanResult.plan && (
                 <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -599,7 +661,7 @@ export default function App() {
                         Proposed Action Plan: {latestScanResult.plan.title}
                       </h4>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        {latestScanResult.actions_planned} files ready to organize. Review the destination paths and reasons before approving.
+                        {latestScanResult.actions_planned} files ready to organize. Review before approving.
                       </p>
                     </div>
 
@@ -621,7 +683,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Plan Items List */}
                   <div className="space-y-2">
                     {latestScanResult.plan.items.map((item) => (
                       <div key={item.id} className="p-3 rounded-lg bg-slate-900/60 border border-slate-800 flex items-center justify-between text-xs">
@@ -635,9 +696,7 @@ export default function App() {
                               {item.target_path.split('\\').slice(-2).join('/')}
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-400">
-                            Reason: {item.reason}
-                          </p>
+                          <p className="text-[11px] text-slate-400">Reason: {item.reason}</p>
                         </div>
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-500/20 text-blue-300 border border-blue-500/30">
                           {item.action_type.toUpperCase()}
@@ -648,7 +707,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Action History & Safe Undo */}
               {completedPlans.length > 0 && (
                 <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
                   <h4 className="text-sm font-bold text-white flex items-center gap-2">
@@ -676,6 +734,96 @@ export default function App() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'lazydesk' && (
+            <div className="space-y-6 max-w-5xl mx-auto">
+              {/* Add Watch Card */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-blue-400" />
+                    LazyDesk Folder Monitoring
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Automatically monitor approved folders for dropped files. Events are debounced, loop-protected, and converted to approval plans.
+                  </p>
+                </div>
+
+                <form onSubmit={handleAddWatch} className="flex gap-2 pt-2">
+                  <select
+                    value={watchFolderInput}
+                    onChange={(e) => setWatchFolderInput(e.target.value)}
+                    className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">-- Select an approved root to watch --</option>
+                    {systemSettings?.approved_roots.map((r) => (
+                      <option key={r.id} value={r.path}>
+                        {r.label} ({r.path})
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    type="submit"
+                    disabled={!watchFolderInput}
+                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1.5 transition disabled:opacity-50"
+                  >
+                    <FolderPlus className="w-3.5 h-3.5" />
+                    <span>Start Watch</span>
+                  </button>
+                </form>
+              </div>
+
+              {/* Active Watches List */}
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-slate-400" />
+                  Configured Folder Monitors ({watches.length})
+                </h4>
+
+                <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden bg-slate-900/40">
+                  {watches.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-slate-500">
+                      No folder watches currently configured. Add one above.
+                    </div>
+                  ) : (
+                    watches.map((w) => (
+                      <div key={w.id} className="p-3.5 flex items-center justify-between text-xs">
+                        <div className="space-y-0.5">
+                          <div className="font-semibold text-white flex items-center gap-2">
+                            <span>{w.folder_path}</span>
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-mono ${w.is_paused ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                              {w.is_paused ? 'PAUSED' : 'ACTIVE'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 font-mono">
+                            Debounce: {w.debounce_seconds}s • Started: {w.created_at.slice(0, 19).replace('T', ' ')}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleToggleWatchPause(w)}
+                            className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:text-white transition"
+                            title={w.is_paused ? 'Resume watch' : 'Pause watch'}
+                          >
+                            {w.is_paused ? <Play className="w-3.5 h-3.5 text-emerald-400" /> : <Pause className="w-3.5 h-3.5 text-amber-400" />}
+                          </button>
+                          <button
+                            onClick={() => handleRemoveWatch(w.id)}
+                            className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 hover:text-rose-400 transition"
+                            title="Remove watch"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -758,6 +906,97 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === 'tasks' && (
+            <div className="space-y-6 max-w-5xl mx-auto">
+              <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <ListTodo className="w-4 h-4 text-purple-400" />
+                      Shared Task History & Lifecycle
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Cooperative background tasks with progress tracking, error logs, and user cancellation.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="border border-slate-800 rounded-lg overflow-hidden bg-slate-900/40">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-900 text-slate-400 border-b border-slate-800 font-mono text-[11px]">
+                      <tr>
+                        <th className="p-2.5">Task ID</th>
+                        <th className="p-2.5">Type</th>
+                        <th className="p-2.5">Status</th>
+                        <th className="p-2.5">Message / Outcome</th>
+                        <th className="p-2.5">Created (UTC)</th>
+                        <th className="p-2.5">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800 text-slate-300">
+                      {tasks.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="p-4 text-center text-slate-500">
+                            No tasks executed yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        tasks.map((task) => (
+                          <tr key={task.id} className="hover:bg-slate-800/30 transition">
+                            <td className="p-2.5 font-mono text-[11px] text-slate-400">
+                              {task.id.slice(0, 8)}
+                            </td>
+                            <td className="p-2.5 uppercase font-mono text-[10px] text-blue-400">
+                              {task.task_type}
+                            </td>
+                            <td className="p-2.5">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium ${
+                                  task.status === 'succeeded'
+                                    ? 'bg-emerald-500/20 text-emerald-400'
+                                    : task.status === 'failed'
+                                    ? 'bg-rose-500/20 text-rose-400'
+                                    : task.status === 'running'
+                                    ? 'bg-blue-500/20 text-blue-400'
+                                    : task.status === 'cancelled'
+                                    ? 'bg-slate-700 text-slate-300'
+                                    : 'bg-amber-500/20 text-amber-300'
+                                }`}
+                              >
+                                {task.status.toUpperCase()}
+                              </span>
+                            </td>
+                            <td className="p-2.5 text-slate-300 max-w-xs truncate" title={task.error_message || task.message}>
+                              {task.error_message ? (
+                                <span className="text-rose-400">{task.error_message}</span>
+                              ) : (
+                                task.message
+                              )}
+                            </td>
+                            <td className="p-2.5 font-mono text-[11px] text-slate-400">
+                              {task.created_at.slice(11, 19)}
+                            </td>
+                            <td className="p-2.5">
+                              {(task.status === 'queued' || task.status === 'running') && (
+                                <button
+                                  onClick={() => handleCancelTask(task.id)}
+                                  className="px-2 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-[10px] font-medium flex items-center gap-1 transition"
+                                >
+                                  <StopCircle className="w-3 h-3" />
+                                  <span>Cancel</span>
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
           {activeTab === 'settings' && (
             <div className="space-y-6 max-w-5xl mx-auto">
               {/* Local Ollama Model Configuration */}
@@ -815,16 +1054,14 @@ export default function App() {
 
               {/* Approved Directory Roots */}
               <div className="rounded-xl border border-slate-800 bg-[#111726]/60 p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                      <ShieldCheck className="w-4 h-4 text-blue-400" />
-                      Approved Directory Roots
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Filesystem operations are strictly confined to these user-approved directories. All path traversal is blocked.
-                    </p>
-                  </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-blue-400" />
+                    Approved Directory Roots
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Filesystem operations are strictly confined to these user-approved directories. All path traversal is blocked.
+                  </p>
                 </div>
 
                 {/* Add Root Form */}
@@ -943,7 +1180,7 @@ export default function App() {
             </div>
           )}
 
-          {activeTab !== 'overview' && activeTab !== 'settings' && activeTab !== 'organizer' && activeTab !== 'approvals' && (
+          {activeTab !== 'overview' && activeTab !== 'settings' && activeTab !== 'organizer' && activeTab !== 'approvals' && activeTab !== 'lazydesk' && activeTab !== 'tasks' && (
             <div className="max-w-6xl mx-auto rounded-xl border border-slate-800 bg-[#111726]/40 p-8 text-center text-slate-400">
               <div className="w-12 h-12 mx-auto rounded-xl bg-slate-800 flex items-center justify-center text-slate-300 mb-3">
                 <Sparkles className="w-6 h-6 text-emerald-400" />
